@@ -1,0 +1,65 @@
+# slack-ai-app-simulator
+
+Spin up a Slack app that simulates **any** AI app from the marketplace — Claude, Asana AI, Notion AI, Cursor, Glean, whatever — for live demos. You configure it by talking to Claude Code.
+
+Setup is one-time, ~15 minutes. After that, each demo takes one command to start.
+
+---
+
+> ## ⚠ The Terminal window must stay open
+>
+> This simulator runs as a long-lived process inside a Terminal window. **If you close the window, the bot dies and stops answering in Slack.**
+>
+> Tuck the window behind Slack during your demo — don't quit it. When you're done, press `Ctrl+C` in the Terminal to stop cleanly.
+
+---
+
+## First time? Ask Claude Code to set it up
+
+Open this folder in Claude Code and type:
+
+> *help me set this up*
+
+Claude will walk you through everything in `SETUP.md`, ask you which AI app you want to simulate, help you pick a unique name, generate the persona, and write the Slack app manifest. You don't need to read any Python.
+
+## Already configured?
+
+Start the app:
+
+```bash
+./run_app.sh
+```
+
+Leave that Terminal window open for your demo. `Ctrl+C` to stop.
+
+## How it works (in one paragraph)
+
+The simulator is a small Python program that connects to Slack via Socket Mode (Slack's real-time event channel for apps that don't have a public URL). When someone DMs the bot or `@mentions` it, the program sends the conversation plus a **persona** markdown file to your local `claude` command (the same Claude Code you're using right now) and streams the reply back into Slack. The persona is what makes the bot "act like" Asana, Claude, Cursor, etc.
+
+No API keys in this project. Your local Claude Code install handles authentication.
+
+## What's in the folder
+
+| Path | What it is |
+|---|---|
+| `SETUP.md` | Step-by-step setup guide. Tagged `[Claude Code]` vs `[Terminal]` for each step. |
+| `CLAUDE.md` | Instructions Claude Code follows to drive the onboarding wizard and help you. |
+| `run_app.sh` | The command to start the simulator. |
+| `manifest.template.json` | Template for creating your Slack app. Filled in during onboarding. |
+| `agent/personas/*.md` | Your persona file (created during onboarding). Edit to change how the bot talks. |
+| `config/app_config.json` | App name, model, loading messages, persona path. Created during onboarding. |
+| `tokens.json` | Your Slack tokens. Created during setup. **Never committed.** |
+
+## Reconfiguring for a different demo
+
+Open this folder in Claude Code and say *"I want to simulate a different app"*. Claude will walk you through restarting the wizard with a fresh persona.
+
+## Stopping and restarting
+
+| What happened | What to do |
+|---|---|
+| Your demo finished | `Ctrl+C` in the Terminal running the app. |
+| You edited the persona or loading messages | `Ctrl+C`, then `./run_app.sh` again. The app reads these on startup only. |
+| The bot stopped responding mid-demo | 9 times out of 10 the Terminal window closed. Reopen it, `cd` to this folder, `./run_app.sh`. |
+
+See `SETUP.md` troubleshooting for more.

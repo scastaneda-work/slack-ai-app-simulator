@@ -1,0 +1,9 @@
+{
+  "team_id": "",
+  "audit_channel_id": "",
+  "agent": {
+    "bot_token": "",
+    "bot_user_id": "",
+    "app_token": ""
+  }
+}

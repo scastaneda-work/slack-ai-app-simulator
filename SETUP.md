@@ -1,0 +1,272 @@
+# slack-ai-app-simulator — Setup
+
+This guide takes you from a fresh clone to a working simulator in about 15 minutes. It's written for Slack Solution Engineers who are fluent in Slack but new to Terminal and Python.
+
+---
+
+## Before you start — if this is your first time with Terminal or Claude Code
+
+**Claude Code** is an AI assistant that runs inside a folder on your computer. You type requests in plain English and it reads your files and runs commands for you. If you're reading this through Claude Code, you already have it installed.
+
+**Terminal** is the Mac/Linux app that lets you type commands directly to your computer. On Windows, the equivalent is **PowerShell**. You can open Terminal on Mac from Spotlight: `Cmd+Space`, type `Terminal`, hit Enter.
+
+**Every command below is tagged with where to run it:**
+
+- **`[Claude Code]`** — paste the command into your Claude Code prompt, or just ask Claude to run it. Claude handles the typing.
+- **`[Terminal]`** — open a dedicated Terminal window and type the command there. Use these for things that ask you for hidden input (like pasting tokens) or that you need to watch and leave running.
+
+**About the working directory.** All commands assume you're "inside" the project folder. Claude Code is there automatically if you opened this folder. In a fresh Terminal window, you get there once with:
+
+```bash
+cd path/to/slack-ai-app-simulator
+```
+
+Replace `path/to/` with wherever you cloned/downloaded it (e.g., `cd ~/claude-projects/slack-ai-app-simulator`).
+
+**About the `claude` CLI.** This simulator sends every reply through your local Claude Code install — specifically, the `claude` command it puts on your system. If you can type `claude` in a Terminal and have Claude Code launch, this project will work. No extra API keys needed.
+
+**About `.venv` (Python virtual environment).** Step 2 creates a folder called `.venv` inside the project. It's a private, sandboxed copy of Python just for this project — installing packages here won't affect the rest of your system.
+
+---
+
+## Prerequisites
+
+- **Slack admin** in your demo org (you'll install an app there).
+- **Python 3.12** installed. Check with:
+  ```bash
+  python3.12 --version
+  ```
+  If that fails, install it:
+  ```bash
+  brew install python@3.12
+  ```
+  > **Don't have Homebrew?** Homebrew is the standard Mac package manager. Install it once from https://brew.sh, then run the `brew install` above.
+  >
+  > **On Windows?** Download Python 3.12 from https://www.python.org/downloads/ and **check "Add python.exe to PATH"** on the first installer screen. Then use the [Windows commands](#windows-commands) table at the bottom of this file for any step that starts with `python3.12`, `source`, or `cp`.
+- **Claude Code installed** and signed in. Check with:
+  ```bash
+  command -v claude
+  ```
+  That should print a path (not "not found"). If it doesn't, install Claude Code first.
+
+---
+
+## Step 1 — `[Claude Code]` Tell Claude what you want to simulate
+
+Just type in Claude Code:
+
+> *help me set this up*
+
+Claude will run the onboarding wizard — it'll ask:
+
+1. Which real app are you simulating? (Claude, Asana, Notion AI, Cursor, Glean, etc.)
+2. What do you want to name your Slack app? (Claude will steer you toward a unique name so it doesn't conflict with the real app if it's installed.)
+3. What's the persona — what should the bot know, how should it sound, what details should it bake in?
+4. Which Claude model to use (default: `sonnet`).
+
+Claude will write three files for you:
+
+- `agent/personas/<your-app>.md` — the persona
+- `config/app_config.json` — app name, model, loading messages
+- `manifest.json` — Slack app manifest (filled in from the template)
+
+Plus example demo prompts in `examples/demo_prompts_generated.md`.
+
+When Claude says "Step 1 done, ready for Step 2?" — continue below.
+
+---
+
+## Step 2 — `[Terminal]` Set up Python
+
+Open a Terminal window and `cd` to this folder. Then:
+
+```bash
+python3.12 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+```
+
+You'll see a new `.venv/` folder appear — that's the sandboxed Python install. It's gitignored.
+
+> If you're on Windows, replace `python3.12` with `py -3.12` and `.venv/bin/pip` with `.venv\Scripts\pip.exe`. See [Windows commands](#windows-commands).
+
+---
+
+## Step 3 — `[Slack web UI]` Create the Slack app from the manifest
+
+1. Open https://api.slack.com/apps in your browser.
+2. Click **Create New App** → **From an app manifest**.
+3. Pick your demo workspace.
+4. Open `manifest.json` (in this folder) and paste the whole file into Slack's manifest box.
+   > **In Claude Code**, ask Claude to open `manifest.json` and show it to you — you can copy from there.
+5. Click **Next** → **Create**.
+
+> **What is a manifest?** A JSON file that pre-fills every setting for your Slack app — name, scopes (permissions), event subscriptions, Socket Mode — so you don't have to click through a dozen forms.
+
+---
+
+## Step 4 — `[Slack web UI]` Install the app to your workspace
+
+1. Still on your app's page at api.slack.com, click **Install to Workspace** (or **Install to Org** for Enterprise Grid).
+2. Review the permissions and click **Allow**.
+
+After install, you'll land on the **OAuth & Permissions** page. Leave that tab open — you'll come back for the bot token in Step 7.
+
+---
+
+## Step 5 — `[Slack web UI]` Generate an app-level token
+
+The simulator connects to Slack via **Socket Mode** — a way for the app to receive events without exposing a public URL from your laptop. That requires an app-level token.
+
+1. On your app's page, click **Basic Information** in the sidebar.
+2. Scroll down to **App-Level Tokens** → **Generate Token and Scopes**.
+3. Name it anything (e.g., `socket-mode`).
+4. Add the scope `connections:write`. Click **Generate**.
+5. Copy the token (starts with `xapp-`). Keep the window open — you'll paste it in Step 6.
+
+---
+
+## Step 6 — `[Terminal]` Save the app-level token
+
+Open a Terminal window (or reuse the one from Step 2), `cd` to this folder, and run:
+
+```bash
+.venv/bin/python tokens/save_app_token.py
+```
+
+It'll ask you to paste the `xapp-` token. **Your keystrokes won't appear on screen — that's intentional** (`getpass` hides token input so it doesn't end up in Terminal scrollback). Paste, press Enter, confirm with `y`.
+
+---
+
+## Step 7 — `[Terminal]` Save the bot token
+
+Go back to the browser tab on **OAuth & Permissions** (from Step 4). Copy the **Bot User OAuth Token** (starts with `xoxb-`).
+
+Then in Terminal:
+
+```bash
+.venv/bin/python tokens/save_bot_token.py
+```
+
+Paste when prompted (again, hidden input). Confirm with `y`.
+
+---
+
+## Step 8 — `[Claude Code]` Fill in `team_id` and (optional) audit channel
+
+Ask Claude to open `tokens.json`. It should look like this after Steps 6–7 (with your actual tokens in the `agent` section):
+
+```json
+{
+  "team_id": "",
+  "audit_channel_id": "",
+  "agent": {
+    "bot_token": "xoxb-...",
+    "bot_user_id": "U...",
+    "app_token": "xapp-..."
+  }
+}
+```
+
+**Fill in `team_id`.** Find it in your Slack URL when you're signed in: `app.slack.com/client/TXXXXXXXX/...` — the `T...` part is your team ID. Paste it between the quotes.
+
+**Optionally fill in `audit_channel_id`.** Create a channel in your demo org (e.g., `#simulator-log`), invite your bot to it, then right-click the channel → **View channel details** → scroll to the bottom → copy the **Channel ID** (starts with `C`). Paste it into `audit_channel_id`. Your simulator will post every startup, error, and reply to this channel — very handy when debugging.
+
+If you skip the audit channel, logging silently no-ops. The simulator still works.
+
+---
+
+## Step 9 — `[Terminal]` Run the app
+
+> ## ⚠ Leave this Terminal window open for the whole demo
+>
+> The simulator runs as a long-lived process inside this window. If you close it, the bot dies and stops answering in Slack. Tuck the window behind Slack — don't quit it.
+
+In Terminal (in this folder):
+
+```bash
+./run_app.sh
+```
+
+You should see a banner like:
+
+```
+───────────────────────────────────────────────────────────────
+  ClaudeSim — simulating: Claude (Anthropic) (model: sonnet)
+───────────────────────────────────────────────────────────────
+  DO NOT CLOSE THIS TERMINAL WINDOW.
+  ...
+```
+
+followed by scope checks:
+
+```
+bot scopes (6): assistant:write, chat:write, chat:write.customize, ...
+  assistant:write: OK
+  chat:write: OK
+  ...
+```
+
+If any scope says `MISSING`, stop. The manifest didn't apply cleanly. Go back to Step 4 and reinstall the app — on the **Install App** page, click **Reinstall to Workspace**.
+
+To stop the app cleanly, press `Ctrl+C`. To restart after any change, `Ctrl+C` then `./run_app.sh` again.
+
+---
+
+## Step 10 — `[Slack]` Verify end-to-end
+
+1. In Slack, open a DM with your bot (search for it by display name). Send "hi".
+2. Within ~2 seconds you should see a loading indicator rotate under the bot's name: *"is thinking..."*, then *"is drafting..."*, etc.
+3. After ~7–10 seconds a streamed reply should appear.
+4. If your bot has Block Kit enabled (Asana-style), ask it something structured like "show me the blockers" or "give me a status summary" — the reply should render as a card, not raw JSON.
+5. Invite the bot to any channel (`/invite @<display_name>`), then `@<display_name> ping`. A reply should appear in-thread.
+
+If any of those fail, check your audit channel (if you set one up). Each error logs a specific reason.
+
+---
+
+## Editing the persona later
+
+Ask Claude Code *"edit the persona"* or directly edit `agent/personas/<your-app>.md`. Then **restart the app** — go to the Terminal running it, `Ctrl+C`, then `./run_app.sh` again. The persona is re-read on startup only.
+
+---
+
+## Troubleshooting
+
+**`claude: command not found`** — Claude Code isn't installed or isn't on your PATH. Install Claude Code. If `command -v claude` still fails after install, reopen your Terminal window (PATH updates don't apply to windows already open).
+
+**Scopes show `MISSING` at startup** — The app install didn't apply the manifest scopes. Go to api.slack.com → your app → **Install App** → **Reinstall to Workspace**. Then `Ctrl+C` the simulator and re-run.
+
+**`not_allowed_token_type`** — You pasted an `xoxb-` where an `xapp-` was expected, or vice versa. Re-run `tokens/save_bot_token.py` or `tokens/save_app_token.py` with the right token.
+
+**`assistant.threads.setStatus rejected`** — Missing the `assistant:write` scope, OR the "Agents & AI Apps" feature isn't enabled on your app. In api.slack.com, go to **Agents & AI Apps** in the sidebar and toggle it on, then reinstall.
+
+**The bot stopped responding mid-demo** — 90% of the time, the Terminal window running `./run_app.sh` was closed. Reopen a Terminal, `cd` to the project folder, `./run_app.sh`, and it'll come back online.
+
+**"I closed the Terminal by accident and my audience is watching"** — Open a new Terminal, `cd` to this folder, `./run_app.sh`, wait ~3 seconds for the banner and scope check, and resume. Existing Slack threads will work — in-memory conversation history is lost, but the persona is what drives responses, so the bot will stay in character.
+
+**The loading indicator shows but no reply appears** — The `claude` subprocess is probably failing silently. Check your audit channel for an error entry, or re-run with verbose logging:
+```bash
+./run_app.sh --debug
+```
+
+**Socket Mode disconnected silently** — `slack_sdk.SocketModeClient` auto-reconnects, but messages sent during the dead window are **not** replayed. If the bot misses a message, just re-send it.
+
+---
+
+## Windows commands
+
+Windows users: Steps 1, 3, 4, 5 are all in the browser and work as written. The differences are in Steps 2, 6, 7, 9:
+
+| Step | Mac/Linux | Windows (PowerShell) |
+|---|---|---|
+| 2 — create venv | `python3.12 -m venv .venv` | `py -3.12 -m venv .venv` |
+| 2 — install deps | `.venv/bin/pip install -r requirements.txt` | `.venv\Scripts\pip.exe install -r requirements.txt` |
+| 6 — save app token | `.venv/bin/python tokens/save_app_token.py` | `.venv\Scripts\python.exe tokens\save_app_token.py` |
+| 7 — save bot token | `.venv/bin/python tokens/save_bot_token.py` | `.venv\Scripts\python.exe tokens\save_bot_token.py` |
+| 9 — run the app | `./run_app.sh` | `.venv\Scripts\python.exe agent\demo_agent.py` |
+
+**First-time PowerShell note:** If Windows refuses to run the venv's scripts with "running scripts is disabled," run this once and retry:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+```

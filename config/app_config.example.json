@@ -1,0 +1,14 @@
+{
+  "app_name": "ClaudeSim",
+  "display_name": "ClaudeSim",
+  "simulates": "Claude (Anthropic)",
+  "model": "sonnet",
+  "loading_messages": [
+    "is thinking...",
+    "is drafting a response...",
+    "is considering...",
+    "is composing..."
+  ],
+  "persona_path": "agent/personas/claudesim.md",
+  "blockkit_enabled": false
+}
