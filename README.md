@@ -22,15 +22,21 @@ Open this folder in Claude Code and type:
 
 Claude will walk you through everything in `SETUP.md`, ask you which AI app you want to simulate, help you pick a unique name, generate the persona, and write the Slack app manifest. You don't need to read any Python.
 
-## Already configured?
+## Already configured? Activating the bot for a demo
 
-Start the app:
+~5 minutes before your demo:
 
-```bash
-./run_app.sh
-```
+1. Open a new Terminal window (on Mac: `Cmd+Space` → `Terminal`).
+2. `cd` into this project folder. Example: `cd ~/claude-projects/slack-ai-app-simulator`.
+3. Start the app:
+   ```bash
+   ./run_app.sh
+   ```
+4. Wait ~3 seconds for the banner and scope check. Once you see every scope as `OK`, the bot is live in Slack.
+5. **Leave this Terminal window open for the whole demo.** Tuck it behind Slack — don't close it, don't quit it, don't let your laptop sleep. Closing the window kills the bot mid-demo.
+6. When the demo ends, come back to the Terminal and press `Ctrl+C` to stop cleanly.
 
-Leave that Terminal window open for your demo. `Ctrl+C` to stop.
+Windows users: replace step 3 with `.venv\Scripts\python.exe agent\demo_agent.py`. See `SETUP.md` for the full Windows table.
 
 ## How it works (in one paragraph)
 

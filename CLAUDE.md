@@ -36,15 +36,17 @@ Save the free-text answer (e.g., "Asana AI", "Notion AI", "Cursor").
 
 *"Great. One thing to flag: if your demo workspace already has the real **<real app>** installed, Slack won't let you install a second app with the exact same name — and even if it did, your audience would see two identical apps and get confused."*
 
-*"Pick a name that signals 'this is a demo stand-in.' Some options for <real app>:"*
+*"Pick a name with some kind of differentiator — a suffix, prefix, or tag that signals 'this is a demo stand-in' and visually sets it apart from the real Marketplace app in your Slack sidebar. The specific word doesn't matter; what matters is that you and your audience can tell them apart. A few examples you could use for <real app>:"*
+- `<RealApp> App`
+- `<RealApp> Sim`
 - `<RealApp> Demo`
-- `<RealApp>Sim`
+- `<RealApp> Bot`
 - `<RealApp> (Demo)`
 - `<RealApp>DX`
 
-*"What would you like to call it?"*
+*"Or something else you like — anything that marks it as a stand-in works. What would you like to call it?"*
 
-If they answer with the exact name of the real app, push back once: *"Heads up — `<name>` is identical to the real Slack Marketplace app. If the real one is installed in your demo org, Slack will reject this one on install. Want me to use `<RealApp>Sim` instead, or are you sure?"* If they insist, respect their choice and move on.
+If they answer with the exact name of the real app, push back once: *"Heads up — `<name>` is identical to the real Slack Marketplace app. If the real one is installed in your demo org, Slack will reject this one on install, and even if it doesn't, your audience will see two identical entries. Want to add a differentiator like `<RealApp> App` or `<RealApp> Sim`, or are you sure?"* If they insist, respect their choice and move on.
 
 ### Step 3 — Display name
 

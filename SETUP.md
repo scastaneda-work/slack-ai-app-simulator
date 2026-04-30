@@ -96,9 +96,15 @@ You'll see a new `.venv/` folder appear — that's the sandboxed Python install.
 1. Open https://api.slack.com/apps in your browser.
 2. Click **Create New App** → **From an app manifest**.
 3. Pick your demo workspace.
-4. Open `manifest.json` (in this folder) and paste the whole file into Slack's manifest box.
+4. **Double-check the app name has a differentiator.** Open `manifest.json` and look at the `name` field near the top. It should **not** be the exact name of the real Marketplace app you're simulating — it needs some visual cue that marks it as a stand-in. Examples: `Claude App`, `Cursor Sim`, `Asana Demo`, `Notion AI (Demo)`, `Glean Bot`. Any suffix or prefix that distinguishes it is fine — the specific word doesn't matter, just that your audience (and Slack's install flow) can tell this apart from the real thing.
+   > **Why this matters:** if the real app later gets installed in the same workspace, Slack will either reject the duplicate or your audience will see two identically-named apps in the sidebar and get confused mid-demo.
+   >
+   > **If you ran the Claude Code onboarding wizard in Step 1**, a differentiator was already baked into `manifest.json` — just confirm it looks right before moving on.
+5. Paste the whole `manifest.json` file into Slack's manifest box.
    > **In Claude Code**, ask Claude to open `manifest.json` and show it to you — you can copy from there.
-5. Click **Next** → **Create**.
+6. Click **Next** → **Create**.
+7. **Upload an app icon.** On the app's page, go to **Basic Information** in the sidebar → scroll to **Display Information** → under **App icon**, click **Add App Icon** and upload a 512×512 PNG of the real app's logo. Grab the logo from the real app's official site or brand/press page (e.g., anthropic.com for Claude, cursor.com for Cursor, asana.com for Asana). Save.
+   > **Why this matters:** without an icon, your bot shows Slack's default grey silhouette in the sidebar and DM list, which breaks the demo illusion. The icon is what makes the stand-in *look* like the real app.
 
 > **What is a manifest?** A JSON file that pre-fills every setting for your Slack app — name, scopes (permissions), event subscriptions, Socket Mode — so you don't have to click through a dozen forms.
 
@@ -221,6 +227,30 @@ To stop the app cleanly, press `Ctrl+C`. To restart after any change, `Ctrl+C` t
 5. Invite the bot to any channel (`/invite @<display_name>`), then `@<display_name> ping`. A reply should appear in-thread.
 
 If any of those fail, check your audit channel (if you set one up). Each error logs a specific reason.
+
+---
+
+## Running for a demo (after initial setup)
+
+Once you've done Steps 1–9 once, every future demo is this short recipe. Run through it ~5 minutes before your customer call.
+
+1. **Open a new Terminal window.** On Mac: `Cmd+Space`, type `Terminal`, hit Enter.
+2. **Go to the project folder.** Example:
+   ```bash
+   cd ~/claude-projects/slack-ai-app-simulator
+   ```
+   (Replace with wherever you cloned it.)
+3. **Start the app.**
+   ```bash
+   ./run_app.sh
+   ```
+4. **Wait ~3 seconds for the banner and scope check.** You should see `<AppName> — simulating: ...` followed by `bot scopes (6): ...` with every scope showing `OK`. Once that's done, the bot is live in Slack.
+5. **Leave this Terminal window open for the whole demo.** Tuck it behind Slack if you want it out of the way — but don't close it, don't quit it, don't `Cmd+W`, don't let your laptop sleep. Closing the window kills the bot and it stops answering mid-demo.
+6. **When the demo ends**, come back to this Terminal and press `Ctrl+C` to stop cleanly.
+
+> **Windows users:** same recipe, but Step 3 is `.venv\Scripts\python.exe agent\demo_agent.py` instead of `./run_app.sh`. See the [Windows commands](#windows-commands) table at the bottom of this file.
+
+**If the bot stops responding mid-demo**, 90% of the time the Terminal got closed. Open a new Terminal, `cd` back to this folder, run `./run_app.sh` again, and the bot comes back online within a few seconds.
 
 ---
 
