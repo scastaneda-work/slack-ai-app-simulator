@@ -77,13 +77,12 @@ Announce the call: *"Since you're simulating Asana, I'm going to teach the bot t
 
 *"Which Claude model should the simulator use under the hood? Defaults and when to pick them:*
 
-- *`sonnet` — fast and good enough for most demos. **Recommended.***
-- *`opus` — higher quality, slightly slower. Pick if your persona has a lot of nuance (big product, many stakeholders, subtle tone).*
-- *`haiku` — fastest, cheapest, lowest quality. Fine for very simple personas.*
+- *`claude-sonnet-4-6` — **Recommended.** Matches what most SEs have configured locally for Claude Code, and is what the QA harness in this repo (`agent/qa.py`) was validated against. Fast and good for most demos.*
+- *`opus` / `claude-opus-4-7` — higher quality, slightly slower. Pick if your persona has a lot of nuance (big product, many stakeholders, subtle tone).*
+- *`haiku` / `claude-haiku-4-5` — fastest, cheapest, lowest quality. Fine for very simple personas.*
+- *Or paste a full model ID if you want to pin something else."*
 
-*Or you can paste a full model ID like `claude-sonnet-4-6` if you want to pin it."*
-
-Default: `sonnet`.
+Default: `claude-sonnet-4-6`.
 
 ### Step 7 — Loading messages (generated, not asked)
 
@@ -104,23 +103,88 @@ Write these in this order, using the Write tool:
 1. **`agent/personas/<slug>.md`** — the persona markdown. Structure:
    - Identity line: *"You are **<display_name>**, <one-line role>."*
    - One-liner: where this bot is operating ("You are speaking in Slack DMs and channels. Keep replies tight — 1–3 short paragraphs or a compact list.")
-   - Formatting rules: markdown basics (`**bold**`, `_italic_`, bullets, inline `code`, `---` dividers). Forbid H1/H2 (Slack threads don't render them well) and forbid triple-backtick code fences for prose.
-   - **If Block Kit enabled**, include a full Block Kit instructions section modeled on `welo_guard.md` in `../slack-demo-toolkit/agent/personas/` — use block types `header`, `divider`, `section`, `context` only; cap at 6 sections per card; `section.text` is `mrkdwn`, `header.text` is `plain_text`; entire response is one ```blockkit``` fence, no prose around it.
+   - **Formatting rules — Slack mrkdwn (NOT standard markdown):**
+     - Bold is `*single asterisks*`. **Never emit `**double asterisks**`** in replies — Slack renders double-asterisk as literal asterisks, not bold. Example: *"Write `*Elliott Ward*`, not `**Elliott Ward**`."*
+     - `_italic_` for asides. Bullets with `- `. Inline `code` for IDs, statuses, field names.
+     - Horizontal rules (`---`) to separate distinct sections.
+     - Never use H1/H2 headings (`#`, `##`). Never use triple-backtick code fences for prose (only for actual code or Block Kit).
+   - **If Block Kit enabled**, include a full Block Kit instructions section:
+     - Use block types `header`, `divider`, `section`, `context` only. Cap at 6 sections per card.
+     - `section.text` must use `"type": "mrkdwn"`. `header.text` must use `"type": "plain_text"`.
+     - **Critical — the entire response is one ` ```blockkit ` fence.** Your very first output character must be a backtick. No prose before the fence, no prose after. If you pre-face the card with "Here are the top priorities:" the lead-in will stream as plain text and the JSON card leaks out below it, which looks broken.
+     - **Yellow status dot:** use `:large_yellow_circle:`, NOT `:yellow_circle:`. `:yellow_circle:` renders as blank in Slack. Other status dots (`:red_circle:`, `:white_circle:`, `:large_green_circle:`) work fine as written.
+     - Include 1–2 example valid Block Kit cards showing exactly the structure you want.
    - Product details from step 4 — features, stakeholders, scenarios, dates, pricing.
-   - Behavior rules: be proactive, stay in lane, commit to an answer (don't ask "who are you?" — pick the most material answer and go), default short, name owners when relevant.
-   - 3–4 sample answers to representative questions in the persona's voice.
+   - **Behavior rules:**
+     - Be proactive, stay in lane.
+     - Commit to an answer — don't gate on clarification unless genuinely unanswerable. Pick the most material interpretation and go.
+     - **You already know who the user is.** At runtime the system prompt is appended with *"The user you are speaking with is *<Name>*."* Resolve "my", "me", "I" against that name + the names in your persona data. **Never ask the user who they are or for their name.** If the name doesn't match any owner in your data, give the cross-project view and note it inline (*"I don't see you as an owner on any current task — here's what's hottest across the board instead."*).
+     - Default short. Name owners when relevant.
+   - 3–4 sample answers to representative questions in the persona's voice. Use `*single asterisks*` for bold in these examples (they'll be emitted verbatim).
 
    The `slug` is the app name lowercased, spaces → hyphens, anything non-alphanumeric stripped (e.g., "Asana Demo" → `asana-demo`).
 
-2. **`config/app_config.json`** — with fields: `app_name`, `display_name`, `simulates`, `model`, `loading_messages` (4 strings), `persona_path` (relative, e.g., `agent/personas/asana-demo.md`), `blockkit_enabled` (boolean).
+2. **`config/app_config.json`** — with fields: `app_name`, `display_name`, `simulates`, `model` (default `claude-sonnet-4-6`), `loading_messages` (4 strings), `persona_path` (relative, e.g., `agent/personas/asana-demo.md`), `blockkit_enabled` (boolean).
 
 3. **`manifest.json`** — copy `manifest.template.json` and substitute `{{APP_NAME}}`, `{{DISPLAY_NAME}}`, `{{SIMULATES}}`.
 
-4. **`examples/demo_prompts_generated.md`** — 8–10 example prompts tailored to the persona. Cover: an overview/status question, a drill-down on a specific item, a question that should trigger Block Kit (if enabled), a question the bot should politely refuse (out of scope), a follow-up clarification question.
+4. **`examples/demo_prompts_generated.md`** — **exactly 5 demo prompts** tailored to the persona, drawn directly from the Step 4 answers (stakeholders, scenarios, dates the SE said the demo should cover). These are the prompts `agent/qa.py --vet-questions` will load + vet in Step 9, so **they must follow a strict format** the parser can read:
 
-### Step 9 — Review demo prompts
+   - Flat markdown list. Each prompt on its own bullet starting with `- `.
+   - One prompt per bullet. No sub-bullets, no multi-line prompts.
+   - No headings, no section dividers, no explanatory prose in between.
+   - Optional surrounding quotes are stripped by the parser, so `- "What's overdue?"` and `- What's overdue?` both work.
 
-Open `examples/demo_prompts_generated.md` and show the SE. *"Here are 8 demo prompts tailored to <display_name>. Any you'd like to tweak, replace, or add scenarios for?"* Loop until they're happy.
+   Cover this mix across the 5:
+   1. An overview / status question that exercises the persona's data.
+   2. A drill-down on a specific item named in Step 4.
+   3. If Block Kit is enabled: one question that should trigger a card (list/board/summary). If not: a second text question from a different angle.
+   4. A question the bot should politely refuse (out of scope for the persona).
+   5. A follow-up / clarification question that builds on one of the earlier prompts.
+
+   Example file contents (generic template — replace the prompts with Step 4 specifics):
+
+   ```
+   - What's the status of the launch?
+   - Who's blocking the design review?
+   - Show me the full project board.
+   - Can you write me a poem?
+   - Draft a message to the owner of that blocker.
+   ```
+
+### Step 8.5 — Known persona pitfalls baked in
+
+The Formatting and Behavior rules above encode runtime learnings the simulator has already absorbed — SEs shouldn't have to rediscover these. Quick reference:
+
+| Pitfall | Rule in persona |
+|---|---|
+| `**double asterisks**` renders as literal asterisks in Slack mrkdwn | Bold is `*single asterisks*` |
+| Prose before ` ```blockkit ` fence makes the card render broken | First output char must be a backtick |
+| `:yellow_circle:` renders as blank in Slack | Use `:large_yellow_circle:` |
+| Model asks "who are you?" on "my priorities" style questions | System prompt tells the bot the user's name at runtime; persona says never ask |
+| Block Kit JSON > Slack schema limits | Runtime validates and audit-logs violations; persona caps sections at 6 |
+
+If a new failure mode comes up in live use, the fix belongs in both places: the **persona template here** (so new installs bake it in) AND the **QA fixtures in `agent/qa.py`** (so `--self-test` catches regressions).
+
+### Step 9 — Vet the demo prompts
+
+The 5 prompts in `examples/demo_prompts_generated.md` came straight from the SE's Step 4 answers — these are the questions they'll actually ask in the demo. Before handing them over, vet them through the real CLI to catch any that break character or hit persona gaps.
+
+Run:
+
+```bash
+.venv/bin/python agent/qa.py --vet-questions
+```
+
+`--vet-questions` reads `examples/demo_prompts_generated.md` by default (the 5 prompts you just wrote), fires each at the configured persona via the same `claude` CLI path the bot uses, extracts + validates any Block Kit output, checks for character-break markers (the model asking "who are you?", leaning on "as an AI", etc.), and prints PASS/FAIL per question.
+
+**Handling the results:**
+- **All 5 PASS** → you're done. Show the SE the prompt list; it's ready to demo.
+- **Any FAIL** → show the SE which prompts failed and why (char-break / schema / parse). Offer to either (a) rewrite the failing prompts to avoid the failure mode, or (b) tighten the persona to cover the gap. Loop until all 5 pass.
+
+Don't skip the vetting step — this is the load-bearing checkpoint that turns "here are some demo prompts" into "here are 5 demo prompts I've confirmed work end-to-end."
+
+If the SE wants to vet more than 5 (deeper coverage, more nuanced personas), bump with `--count N`. If they want to vet an ad-hoc set instead of the generated file, pass `--questions "q1|q2|q3"`.
 
 ### Step 10 — Recap
 

@@ -43,10 +43,172 @@ LOADING_INTERVAL_MIN_S = 1.5
 LOADING_INTERVAL_MAX_S = 3.0
 LOADING_FLOOR_MIN_S = 7.0
 LOADING_FLOOR_MAX_S = 10.0
-BLOCKKIT_DETECT_CHARS = 14
+
+# Block Kit extraction + decision logic.
+#
+# The model is asked to emit its entire response as a single ```blockkit fence
+# wrapping a JSON array. In practice it sometimes adds a trailing sentence,
+# runs out of tokens mid-JSON, or produces valid JSON that violates Slack's
+# schema. These helpers classify failures so the runtime can fall back
+# gracefully and the audit log tells you *which* bucket broke (parse_error /
+# schema_error / trailing_prose / truncated). See qa.py --self-test for the
+# fixture set that covers each path.
 BLOCKKIT_FENCE_RE = re.compile(r"^\s*```blockkit\s*\n(.*?)\n```\s*$", re.DOTALL)
+_BLOCKKIT_LOOSE_RE = re.compile(r"```blockkit\s*\n(.*?)\n```", re.DOTALL)
+_ALLOWED_BLOCK_TYPES = {"header", "divider", "section", "context", "actions", "image"}
+_ALLOWED_ELEMENT_TYPES = {"mrkdwn", "plain_text", "image"}
+
+# When deciding "is this reply a Block Kit card?" during streaming: don't
+# commit to plain-text streaming too early — the model occasionally emits a
+# short sentence before the fence and we'd stream the lead-in + the raw JSON
+# if we commit to text before the fence arrives. Buffer until we have
+# enough to decide OR we're close to the loading-floor end.
+BLOCKKIT_DECISION_MIN_CHARS = 14
+BLOCKKIT_DECISION_MARGIN_S = 0.2
 
 log = logging.getLogger("simulator")
+
+
+def _balanced_array_slice(s: str) -> str | None:
+    """Return the substring from the first '[' to its matching ']', respecting
+    quoted strings and escapes. Used as a last-ditch recovery when a closing
+    ``` fence is missing (truncated output)."""
+    start = s.find("[")
+    if start == -1:
+        return None
+    depth = 0
+    in_str = False
+    escape = False
+    for i in range(start, len(s)):
+        c = s[i]
+        if in_str:
+            if escape:
+                escape = False
+            elif c == "\\":
+                escape = True
+            elif c == '"':
+                in_str = False
+        else:
+            if c == '"':
+                in_str = True
+            elif c == "[":
+                depth += 1
+            elif c == "]":
+                depth -= 1
+                if depth == 0:
+                    return s[start : i + 1]
+    return None
+
+
+def _extract_blockkit_json(text: str) -> tuple[list | None, str]:
+    """Try progressively looser strategies to pull a blocks list out of text.
+
+    Returns (blocks_or_None, tier) where tier is one of:
+      - "strict"        — exact ```blockkit…``` fence, response is only the fence
+      - "trailing_prose"— fence present but extra text before/after
+      - "truncated"     — no closing fence; bracket-walked the JSON array
+      - "parse_error"   — extraction found something but JSON parse failed
+      - "no_fence"      — no ```blockkit marker at all
+    """
+    m = BLOCKKIT_FENCE_RE.match(text)
+    if m:
+        try:
+            parsed = json.loads(m.group(1))
+            blocks = parsed if isinstance(parsed, list) else parsed.get("blocks")
+            if isinstance(blocks, list):
+                return blocks, "strict"
+        except (ValueError, AttributeError):
+            return None, "parse_error"
+
+    m = _BLOCKKIT_LOOSE_RE.search(text)
+    if m:
+        try:
+            parsed = json.loads(m.group(1))
+            blocks = parsed if isinstance(parsed, list) else parsed.get("blocks")
+            if isinstance(blocks, list):
+                return blocks, "trailing_prose"
+        except (ValueError, AttributeError):
+            return None, "parse_error"
+
+    if "```blockkit" in text:
+        after = text.split("```blockkit", 1)[1]
+        arr = _balanced_array_slice(after)
+        if arr:
+            try:
+                parsed = json.loads(arr)
+                if isinstance(parsed, list):
+                    return parsed, "truncated"
+            except ValueError:
+                return None, "parse_error"
+        return None, "parse_error"
+
+    return None, "no_fence"
+
+
+def _validate_blocks(blocks: list) -> list[str]:
+    """Cheap subset-check of Slack's Block Kit constraints. Returns a list of
+    human-readable violations; empty list means "looks postable."""
+    violations: list[str] = []
+    if not isinstance(blocks, list):
+        return ["top-level is not a list"]
+    if len(blocks) > 50:
+        violations.append(f"too many blocks: {len(blocks)} (max 50)")
+    for i, b in enumerate(blocks):
+        if not isinstance(b, dict):
+            violations.append(f"block[{i}] is not an object")
+            continue
+        t = b.get("type")
+        if t not in _ALLOWED_BLOCK_TYPES:
+            violations.append(f"block[{i}].type={t!r} not in allowed set")
+            continue
+        if t == "header":
+            txt = (b.get("text") or {})
+            if txt.get("type") != "plain_text":
+                violations.append(f"block[{i}] header.text.type must be plain_text")
+            if len(txt.get("text", "")) > 150:
+                violations.append(f"block[{i}] header.text >150 chars")
+        elif t == "section":
+            txt = b.get("text")
+            if not isinstance(txt, dict):
+                violations.append(f"block[{i}] section missing text object")
+            else:
+                if txt.get("type") not in {"mrkdwn", "plain_text"}:
+                    violations.append(f"block[{i}] section.text.type invalid")
+                if len(txt.get("text", "")) > 3000:
+                    violations.append(f"block[{i}] section.text >3000 chars")
+        elif t == "context":
+            els = b.get("elements")
+            if not isinstance(els, list):
+                violations.append(f"block[{i}] context.elements missing")
+            else:
+                if len(els) > 10:
+                    violations.append(f"block[{i}] context.elements >10")
+                for j, el in enumerate(els):
+                    if not isinstance(el, dict) or el.get("type") not in _ALLOWED_ELEMENT_TYPES:
+                        violations.append(f"block[{i}].elements[{j}].type invalid")
+    return violations
+
+
+def _blockkit_decision(buf: str, elapsed_s: float, floor_s: float) -> str:
+    """Decide what to do with a streaming buffer during the detect phase.
+
+    Returns one of:
+      - "buffer"   — keep accumulating; no decision yet.
+      - "blockkit" — a ```blockkit fence has appeared; switch to blockkit path.
+      - "text"     — no fence likely; commit to plain-text streaming.
+
+    Why not just check the prefix: the model sometimes pre-faces the card
+    with a short sentence ("Here are the top priorities:"). If we commit
+    to plain-text streaming before the fence appears, the later fence gets
+    streamed as raw JSON in a code block and the user sees garbage.
+    """
+    if "```blockkit" in buf:
+        return "blockkit"
+    if len(buf) < BLOCKKIT_DECISION_MIN_CHARS:
+        return "buffer"
+    if elapsed_s >= max(0.0, floor_s - BLOCKKIT_DECISION_MARGIN_S):
+        return "text"
+    return "buffer"
 
 
 class Simulator:
@@ -56,7 +218,10 @@ class Simulator:
         self.display_name: str = cfg["display_name"]
         self.app_name: str = cfg.get("app_name", self.display_name)
         self.simulates: str = cfg.get("simulates", "(unspecified)")
-        self.model: str = cfg.get("model", "sonnet")
+        # Default to claude-sonnet-4-6 — the model the QA harness is
+        # validated against and what most SEs have configured for Claude
+        # Code. Override via app_config.json "model" field.
+        self.model: str = cfg.get("model", "claude-sonnet-4-6")
         self.loading_messages: list[str] = cfg.get("loading_messages") or [
             f"is thinking...",
             f"is drafting a reply...",
@@ -94,6 +259,12 @@ class Simulator:
         self.history_lock = Lock()
         self.titled: set[tuple[str, str]] = set()
         self.thread_context: dict[tuple[str, str], str] = {}
+        # Cache of Slack user display names, so the bot can be told who it's
+        # talking to and avoid the "who are you?" failure mode on "my tasks"
+        # style questions. None means lookup failed — still cached so we
+        # don't hammer users.info on every message.
+        self.user_names: dict[str, str | None] = {}
+        self.user_names_lock = Lock()
 
         self.socket = SocketModeClient(app_token=self.app_token, web_client=self.web)
         self.socket.socket_mode_request_listeners.append(self._on_request)
@@ -118,6 +289,7 @@ class Simulator:
             "im:history",
             "channels:history",
             "app_mentions:read",
+            "users:read",  # needed for _resolve_user_name (identity injection)
         )
         try:
             resp = self.web.auth_test()
@@ -221,6 +393,18 @@ class Simulator:
         system_prompt = self.system_prompt
         if ctx_channel:
             system_prompt += f"\n\n---\n\nThe user is currently viewing channel <#{ctx_channel}>."
+        # Identity injection — tell the model who it's talking to so it
+        # doesn't ask for a name on "my tasks / my priorities" style
+        # questions. Cached per user_id; None means we couldn't resolve,
+        # and we skip the injection rather than inject garbage.
+        user_name = self._resolve_user_name(user_id)
+        if user_name:
+            system_prompt += (
+                f"\n\nThe user you are speaking with is *{user_name}*. "
+                f"When they say 'my', 'me', or 'I', they are referring to themselves — "
+                f"resolve it against the names in your persona data and answer accordingly. "
+                f"Never ask who they are; you already know."
+            )
 
         if is_dm and is_first_turn and key not in self.titled:
             self.titled.add(key)
@@ -299,6 +483,111 @@ class Simulator:
 
     # ---- side effects -----------------------------------------------------
 
+    def _resolve_user_name(self, user_id: str) -> str | None:
+        """Return a Slack user's display name, cached per user_id. Prefers
+        `profile.display_name` (what they chose to show), falls back to
+        `profile.real_name` (their HR name), then `user.real_name`. Returns
+        None on any failure — callers must treat missing names as 'no
+        identity info available' rather than an error."""
+        with self.user_names_lock:
+            if user_id in self.user_names:
+                return self.user_names[user_id]
+        try:
+            resp = self.web.users_info(user=user_id)
+        except SlackApiError as e:
+            err = e.response.get("error")
+            log.warning("users.info failed for %s: %s", user_id, err)
+            with self.user_names_lock:
+                self.user_names[user_id] = None
+            return None
+        user = resp.get("user") or {}
+        profile = user.get("profile") or {}
+        name = (
+            profile.get("display_name")
+            or profile.get("real_name")
+            or user.get("real_name")
+            or None
+        )
+        if not name:
+            name = None
+        with self.user_names_lock:
+            self.user_names[user_id] = name
+        return name
+
+    def _replay_buffered_text(self, channel: str, ts: str | None, text: str) -> None:
+        """Replay a fully-buffered reply into Slack as paced chunks, mirroring
+        the live-streaming cadence (STREAM_CHUNK_CHARS / STREAM_FLUSH_MS).
+        The last chunk rides on chat.stopStream so the placeholder closes
+        cleanly. Both the short-reply path (model finished fast, no stream
+        opened mid-generation) and the long-reply path call this."""
+        pending = text
+        final_chunk = ""
+        while pending:
+            chunk, pending = pending[:STREAM_CHUNK_CHARS], pending[STREAM_CHUNK_CHARS:]
+            if not pending:
+                final_chunk = chunk
+                break
+            try:
+                self.web.chat_appendStream(
+                    channel=channel, ts=ts, markdown_text=chunk
+                )
+            except SlackApiError as e:
+                err = e.response.get("error")
+                hints = e.response.get("response_metadata", {}).get("messages") or []
+                log.error("chat.appendStream failed: %s (%s)", err, hints)
+                audit_log(
+                    f":warning: {self.display_name} `chat.appendStream` rejected → `{err}` "
+                    f"ts=`{ts}` chunk_len={len(chunk)} hints={hints}"
+                )
+                break
+            time.sleep(STREAM_FLUSH_MS / 1000)
+
+        if ts is None:
+            audit_log(
+                f":warning: {self.display_name} `chat.stopStream` skipped: `ts` was None "
+                f"(startStream likely failed upstream; reply len={len(text)})"
+            )
+            return
+        try:
+            stop_kwargs: dict[str, Any] = {"channel": channel, "ts": ts}
+            if final_chunk:
+                stop_kwargs["markdown_text"] = final_chunk
+            self.web.chat_stopStream(**stop_kwargs)
+        except SlackApiError as e:
+            err = e.response.get("error")
+            hints = e.response.get("response_metadata", {}).get("messages") or []
+            log.error("chat.stopStream failed: %s (%s)", err, hints)
+            audit_log(
+                f":warning: {self.display_name} `chat.stopStream` rejected → `{err}` "
+                f"ts=`{ts}` final_chunk_len={len(final_chunk)} "
+                f"reply_len={len(text)} hints={hints} "
+                f"(final flush failed; placeholder may remain)"
+            )
+
+    def _finalize_dropped_stream(self, channel: str, ts: str | None, buf: str) -> None:
+        """Close a Slack streaming message that was interrupted mid-reply
+        (claude CLI subprocess died, network blip, etc.). Flushes any buffered
+        text, then calls chat.stopStream with a short appended note so the
+        user sees something instead of a half-frozen placeholder. Never raises."""
+        if not ts:
+            return
+        tail = "\n\n_(connection dropped — please ask again)_"
+        try:
+            if buf:
+                self.web.chat_appendStream(channel=channel, ts=ts, markdown_text=buf)
+        except SlackApiError as e:
+            err = e.response.get("error")
+            hints = e.response.get("response_metadata", {}).get("messages") or []
+            log.error("drop-finalize appendStream failed: %s (%s)", err, hints)
+        try:
+            self.web.chat_stopStream(
+                channel=channel, ts=ts, markdown_text=tail
+            )
+        except SlackApiError as e:
+            err = e.response.get("error")
+            hints = e.response.get("response_metadata", {}).get("messages") or []
+            log.error("drop-finalize stopStream failed: %s (%s)", err, hints)
+
     def _post(self, channel: str, thread_ts: str, text: str) -> str | None:
         try:
             resp = self.web.chat_postMessage(
@@ -376,6 +665,11 @@ class Simulator:
             last_flush = time.monotonic()
 
         def _start_stream() -> bool:
+            """Open the Slack streaming placeholder. Returns False (with a
+            fallback-to-postMessage audit note) on SlackApiError OR when the
+            response comes back without a usable `ts`. The missing-ts branch
+            protects us from downstream appendStream/stopStream calls that
+            would fail with invalid_arguments."""
             nonlocal ts
             try:
                 start_resp = self.web.chat_startStream(
@@ -385,8 +679,6 @@ class Simulator:
                     recipient_user_id=user_id,
                     username=self.display_name,
                 )
-                ts = start_resp.get("ts")
-                return True
             except SlackApiError as e:
                 err = e.response.get("error")
                 log.error("chat.startStream failed (%s)", err)
@@ -395,6 +687,17 @@ class Simulator:
                     f"Falling back to plain `chat.postMessage` (no streaming)."
                 )
                 return False
+            got_ts = start_resp.get("ts") if start_resp is not None else None
+            if not got_ts:
+                ok = start_resp.get("ok") if start_resp is not None else None
+                log.error("chat.startStream returned no ts: ok=%s", ok)
+                audit_log(
+                    f":warning: {self.display_name} `chat.startStream` returned no `ts` "
+                    f"(ok=`{ok}`). Falling back to plain `chat.postMessage`."
+                )
+                return False
+            ts = got_ts
+            return True
 
         try:
             stream_iter = stream_reply(
@@ -404,6 +707,20 @@ class Simulator:
             )
             for event_type, payload in stream_iter:
                 if event_type == "error":
+                    # If the subprocess errored mid-stream (after we opened
+                    # the Slack placeholder), don't let the traceback splash
+                    # into audit — finalize the placeholder with a
+                    # "connection dropped" note and return gracefully.
+                    if started_streaming:
+                        log.warning("claude subprocess dropped mid-stream: %s", payload[:200])
+                        self._finalize_dropped_stream(channel, ts, buf)
+                        audit_log(
+                            f":electric_plug: {self.display_name} CLI dropped mid-stream. "
+                            f"Partial reply flushed; asked user to retry."
+                        )
+                        loading_stop.set()
+                        self._set_status(channel, thread_ts, "")
+                        return (buf or "(dropped)"), EMPTY_USAGE
                     error_text = payload
                     continue
                 if event_type == "final":
@@ -414,11 +731,18 @@ class Simulator:
 
                 buf += payload
 
+                # Detection phase: scan the full buffer (not just prefix)
+                # for ```blockkit. Defer the text-vs-card commit until near
+                # the loading floor so a slow pre-fence sentence doesn't
+                # get mis-committed to plain-text streaming.
                 if detect_phase:
-                    if len(buf) < BLOCKKIT_DETECT_CHARS:
+                    decision = _blockkit_decision(
+                        buf, time.monotonic() - t_start, floor_s
+                    )
+                    if decision == "buffer":
                         continue
                     detect_phase = False
-                    is_blockkit = buf.lstrip().startswith("```blockkit")
+                    is_blockkit = decision == "blockkit"
                     if is_blockkit:
                         continue
 
@@ -462,28 +786,13 @@ class Simulator:
         if detect_phase and self.blockkit_enabled:
             is_blockkit = full_text.lstrip().startswith("```blockkit")
 
-        # Fallback path: no deltas ever arrived AND we never opened a stream.
-        # Post the full reply as a single chat.postMessage after the loading
-        # floor so the UX still feels right (loading spinner → reply bubble).
-        if not started_streaming and not is_blockkit:
-            remaining = floor_s - (time.monotonic() - t_start)
-            if remaining > 0:
-                time.sleep(remaining)
-            loading_stop.set()
-            self._set_status(channel, thread_ts, "")
-            self._post(channel, thread_ts, full_text)
-            return full_text, EMPTY_USAGE
-
         # Block Kit path: parse the fence, wait out the floor, post as blocks.
         if is_blockkit:
-            blocks = None
-            m = BLOCKKIT_FENCE_RE.match(full_text)
-            if m:
-                try:
-                    parsed = json.loads(m.group(1))
-                    blocks = parsed if isinstance(parsed, list) else parsed.get("blocks")
-                except (ValueError, AttributeError) as e:
-                    log.warning("blockkit fence found but JSON invalid: %s", e)
+            blocks, tier = _extract_blockkit_json(full_text)
+            violations: list[str] = _validate_blocks(blocks) if blocks else []
+            if violations:
+                log.warning("blockkit schema violations (tier=%s): %s", tier, violations)
+                blocks = None
             remaining = floor_s - (time.monotonic() - t_start)
             if remaining > 0:
                 time.sleep(remaining)
@@ -498,51 +807,47 @@ class Simulator:
                         text="(Block Kit card)",
                         username=self.display_name,
                     )
+                    if tier != "strict":
+                        log.info("blockkit recovered via tier=%s", tier)
                 except SlackApiError as e:
                     err = e.response.get("error")
                     log.error("chat.postMessage (blocks) failed: %s", err)
                     audit_log(f":warning: {self.display_name} blocks post rejected → `{err}`")
                     self._post(channel, thread_ts, full_text)
             else:
+                failure_class = "schema_error" if violations else tier
+                detail = (
+                    f"violations={violations}"
+                    if violations
+                    else f"raw start: ```{full_text[:200]}```"
+                )
                 audit_log(
-                    f":warning: {self.display_name} Block Kit fence unparseable. "
-                    f"Raw start: ```{full_text[:200]}```"
+                    f":warning: {self.display_name} Block Kit fence unpostable "
+                    f"(class=`{failure_class}`). {detail}"
                 )
                 self._post(channel, thread_ts, "Sorry, I botched the card formatting. Try again?")
             return full_text, EMPTY_USAGE
 
-        # Normal streaming path: finish replaying the buffered reply paced.
-        pending = buf
-        buf = ""
-        final_chunk = ""
-        while pending:
-            chunk, pending = pending[:STREAM_CHUNK_CHARS], pending[STREAM_CHUNK_CHARS:]
-            if not pending:
-                final_chunk = chunk
-                break
-            try:
-                self.web.chat_appendStream(
-                    channel=channel, ts=ts, markdown_text=chunk
-                )
-            except SlackApiError as e:
-                err = e.response.get("error")
-                log.error("chat.appendStream failed: %s", err)
-                break
-            time.sleep(STREAM_FLUSH_MS / 1000)
+        # Short-reply case: the model finished before _blockkit_decision
+        # crossed into "text" (fast, short answer; under the loading
+        # floor). Open a stream now and replay the buffer so short
+        # answers animate the same way long ones do. If startStream
+        # can't deliver a ts, fall back to chat.postMessage.
+        if not started_streaming:
+            remaining = floor_s - (time.monotonic() - t_start)
+            if remaining > 0:
+                time.sleep(remaining)
+            loading_stop.set()
+            self._set_status(channel, thread_ts, "")
+            if _start_stream():
+                self._replay_buffered_text(channel, ts, full_text)
+            else:
+                self._post(channel, thread_ts, full_text)
+            return full_text, EMPTY_USAGE
 
-        try:
-            stop_kwargs: dict[str, Any] = {"channel": channel, "ts": ts}
-            if final_chunk:
-                stop_kwargs["markdown_text"] = final_chunk
-            self.web.chat_stopStream(**stop_kwargs)
-        except SlackApiError as e:
-            err = e.response.get("error")
-            log.error("chat.stopStream failed: %s", err)
-            audit_log(
-                f":warning: {self.display_name} `chat.stopStream` rejected → `{err}` "
-                f"(final flush failed; placeholder may remain)"
-            )
-
+        # Long-reply path: stream was opened mid-generation. Replay
+        # whatever's left in `buf` at the same paced cadence.
+        self._replay_buffered_text(channel, ts, buf)
         return full_text, EMPTY_USAGE
 
     def _reply_no_stream(
@@ -580,14 +885,14 @@ class Simulator:
         self._set_status(channel, thread_ts, "")
 
         blocks = None
+        tier = "no_fence"
+        violations: list[str] = []
         if self.blockkit_enabled:
-            m = BLOCKKIT_FENCE_RE.match(text)
-            if m:
-                try:
-                    parsed = json.loads(m.group(1))
-                    blocks = parsed if isinstance(parsed, list) else parsed.get("blocks")
-                except (ValueError, AttributeError):
-                    pass
+            blocks, tier = _extract_blockkit_json(text)
+            violations = _validate_blocks(blocks) if blocks else []
+            if violations:
+                log.warning("blockkit schema violations (tier=%s): %s", tier, violations)
+                blocks = None
         if blocks:
             try:
                 self.web.chat_postMessage(

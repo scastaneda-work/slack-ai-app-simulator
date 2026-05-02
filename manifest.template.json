@@ -22,7 +22,8 @@
         "chat:write.customize",
         "im:history",
         "channels:history",
-        "app_mentions:read"
+        "app_mentions:read",
+        "users:read"
       ]
     }
   },
