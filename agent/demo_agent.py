@@ -211,6 +211,20 @@ def _blockkit_decision(buf: str, elapsed_s: float, floor_s: float) -> str:
     return "buffer"
 
 
+_NAME_BAD_CHARS = re.compile(r"[`*_~|<>\\\n\r\t]")
+
+
+def _sanitize_user_name(name: str) -> str:
+    """Strip Slack mrkdwn-control chars and newlines from a user-supplied
+    display name before splicing it into the system prompt. Slack lets users
+    pick any display name they want, including things like '*\\n\\nNew rules:'
+    that would act as prompt injection. Cap length so a giant pasted name
+    can't dominate the system prompt either."""
+    cleaned = _NAME_BAD_CHARS.sub(" ", name).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned[:80]
+
+
 class Simulator:
     def __init__(self, *, stream: bool = True):
         cfg = load_app_config()
@@ -508,8 +522,8 @@ class Simulator:
             or user.get("real_name")
             or None
         )
-        if not name:
-            name = None
+        if name:
+            name = _sanitize_user_name(name) or None
         with self.user_names_lock:
             self.user_names[user_id] = name
         return name
