@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -25,9 +26,20 @@ def load_tokens() -> dict[str, Any]:
 
 
 def save_tokens(tokens: dict[str, Any]) -> None:
-    with TOKENS_PATH.open("w") as f:
+    """Write tokens.json atomically with owner-only permissions.
+
+    Atomic: write to a sibling tmp file, then os.replace() — a crash mid-write
+    can never leave tokens.json half-written.
+    Permissions: 0600 so other users on the machine can't read xoxb-/xapp-
+    tokens. Applied before the rename so the final file is never briefly
+    world-readable. (No-op on Windows beyond the read-only bit.)
+    """
+    tmp = TOKENS_PATH.with_suffix(".json.tmp")
+    with tmp.open("w") as f:
         json.dump(tokens, f, indent=2)
         f.write("\n")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, TOKENS_PATH)
 
 
 def load_app_config() -> dict[str, Any]:
