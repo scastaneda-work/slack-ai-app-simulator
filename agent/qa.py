@@ -38,7 +38,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from threading import Lock
+from threading import Event, Lock
 
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent))  # repo root for `config`
@@ -48,6 +48,7 @@ from demo_agent import (  # noqa: E402
     Simulator,
     _blockkit_decision,
     _extract_blockkit_json,
+    _has_blockkit_candidate,
     _validate_blocks,
 )
 
@@ -204,10 +205,43 @@ def _run_self_test() -> int:
         if not ok:
             fail += 1
 
+    # Final-result classifier: keep terminal-only CLI results aligned with the
+    # streaming detector, which scans for a blockkit fence anywhere in the text.
+    final_classifier_cases: list[tuple[str, str, bool]] = [
+        (
+            "strict final card",
+            '```blockkit\n[{"type":"divider"}]\n```',
+            True,
+        ),
+        (
+            "prefaced final card",
+            'Here are the top priorities:\n\n```blockkit\n[{"type":"divider"}]\n```',
+            True,
+        ),
+        (
+            "malformed final card",
+            '```blockkit\n[{"type": "divider",}]\n```',
+            True,
+        ),
+        (
+            "plain final text",
+            "Here is a regular markdown reply.",
+            False,
+        ),
+    ]
+    for label, raw, expected in final_classifier_cases:
+        got = _has_blockkit_candidate(raw)
+        ok = got == expected
+        status = "OK  " if ok else "FAIL"
+        print(f"[self-test] {status} final classifier: {label} → {got} (want {expected})")
+        if not ok:
+            fail += 1
+
     # Replay helper: 250-char input splits into paced chunks + final chunk
     # on chat.stopStream. Monkeypatch time.sleep so the test runs instantly
     # instead of ~4s per call.
     import demo_agent as _demo_agent_mod
+    from slack_sdk.errors import SlackApiError
 
     class _RecWeb:
         def __init__(self) -> None:
@@ -221,10 +255,150 @@ def _run_self_test() -> int:
 
         def chat_postMessage(self, **kwargs):
             self.calls.append(("postMessage", kwargs))
+            return {"ts": "post.1"}
+
+        def chat_startStream(self, **kwargs):
+            self.calls.append(("startStream", kwargs))
+            return {"ts": "stream.1"}
+
+        def assistant_threads_setStatus(self, **kwargs):
+            self.calls.append(("setStatus", kwargs))
 
     orig_sleep = _demo_agent_mod.time.sleep
+    orig_stream_reply = _demo_agent_mod.stream_reply
     _demo_agent_mod.time.sleep = lambda _s: None
     try:
+        def _make_stream_shim(web, *, blockkit_enabled: bool = True):
+            shim = object.__new__(Simulator)
+            shim.web = web
+            shim.display_name = "TestBot"
+            shim.team_id = "T123"
+            shim.model = "test-model"
+            shim.blockkit_enabled = blockkit_enabled
+            shim.stream = True
+            return shim
+
+        def _run_stream_case(events, *, blockkit_enabled: bool = True):
+            def fake_stream_reply(**_kwargs):
+                yield from events
+
+            _demo_agent_mod.stream_reply = fake_stream_reply
+            web_case = _RecWeb()
+            shim_case = _make_stream_shim(web_case, blockkit_enabled=blockkit_enabled)
+            reply, _usage = Simulator._stream_reply(
+                shim_case,
+                "C123",
+                "thread.1",
+                "U123",
+                "system",
+                [{"role": "user", "content": "show me blockers"}],
+                Event(),
+            )
+            return reply, web_case.calls
+
+        # A terminal-only result with prose before a valid card should still
+        # post Block Kit, not stream or post the raw fenced JSON.
+        prefaced_reply, prefaced_calls = _run_stream_case([
+            (
+                "final",
+                'Here are the top priorities:\n\n'
+                '```blockkit\n[{"type":"divider"}]\n```',
+            )
+        ])
+        prefaced_block_posts = [
+            c for c in prefaced_calls
+            if c[0] == "postMessage" and "blocks" in c[1]
+        ]
+        prefaced_raw_posts = [
+            c for c in prefaced_calls
+            if c[0] == "postMessage" and "```blockkit" in c[1].get("text", "")
+        ]
+        prefaced_stream_starts = [c for c in prefaced_calls if c[0] == "startStream"]
+        if prefaced_block_posts and not prefaced_raw_posts and not prefaced_stream_starts:
+            print("[self-test] OK   stream reply: prefaced final Block Kit posts as blocks")
+        else:
+            fail += 1
+            print(
+                "[self-test] FAIL stream reply prefaced Block Kit: "
+                f"block_posts={len(prefaced_block_posts)} "
+                f"raw_posts={len(prefaced_raw_posts)} starts={len(prefaced_stream_starts)} "
+                f"reply_len={len(prefaced_reply)}"
+            )
+
+        # A malformed card should not leak fenced JSON into Slack.
+        malformed_reply, malformed_calls = _run_stream_case([
+            ("final", '```blockkit\n[{"type": "divider",}]\n```')
+        ])
+        malformed_raw_posts = [
+            c for c in malformed_calls
+            if c[0] == "postMessage" and "```blockkit" in c[1].get("text", "")
+        ]
+        malformed_apologies = [
+            c for c in malformed_calls
+            if c[0] == "postMessage" and "botched the card formatting" in c[1].get("text", "")
+        ]
+        malformed_stream_starts = [c for c in malformed_calls if c[0] == "startStream"]
+        if malformed_apologies and not malformed_raw_posts and not malformed_stream_starts:
+            print("[self-test] OK   stream reply: malformed Block Kit posts clean apology")
+        else:
+            fail += 1
+            print(
+                "[self-test] FAIL stream reply malformed Block Kit: "
+                f"apologies={len(malformed_apologies)} "
+                f"raw_posts={len(malformed_raw_posts)} starts={len(malformed_stream_starts)} "
+                f"reply_len={len(malformed_reply)}"
+            )
+
+        # If Slack rejects a valid blocks payload, fall back to a clear text
+        # error instead of posting the raw fenced JSON.
+        class _RejectBlocksWeb(_RecWeb):
+            def chat_postMessage(self, **kwargs):
+                self.calls.append(("postMessage", kwargs))
+                if "blocks" in kwargs:
+                    raise SlackApiError(
+                        "invalid_blocks",
+                        {"ok": False, "error": "invalid_blocks"},
+                    )
+                return {"ts": "post.1"}
+
+        reject_web = _RejectBlocksWeb()
+        reject_shim = _make_stream_shim(reject_web, blockkit_enabled=True)
+        _demo_agent_mod.stream_reply = lambda **_kwargs: iter([
+            ("final", '```blockkit\n[{"type":"divider"}]\n```')
+        ])
+        rejected_reply, _usage = Simulator._stream_reply(
+            reject_shim,
+            "C123",
+            "thread.1",
+            "U123",
+            "system",
+            [{"role": "user", "content": "show me blockers"}],
+            Event(),
+        )
+        reject_block_attempts = [
+            c for c in reject_web.calls
+            if c[0] == "postMessage" and "blocks" in c[1]
+        ]
+        reject_text_fallbacks = [
+            c for c in reject_web.calls
+            if c[0] == "postMessage"
+            and "Slack rejected" in c[1].get("text", "")
+        ]
+        reject_raw_posts = [
+            c for c in reject_web.calls
+            if c[0] == "postMessage" and "```blockkit" in c[1].get("text", "")
+        ]
+        if reject_block_attempts and reject_text_fallbacks and not reject_raw_posts:
+            print("[self-test] OK   stream reply: rejected blocks post clean fallback")
+        else:
+            fail += 1
+            print(
+                "[self-test] FAIL stream reply rejected blocks: "
+                f"block_attempts={len(reject_block_attempts)} "
+                f"fallbacks={len(reject_text_fallbacks)} "
+                f"raw_posts={len(reject_raw_posts)} reply_len={len(rejected_reply)}"
+            )
+
         web = _RecWeb()
         shim = type("Shim", (), {"web": web, "display_name": "TestBot"})()
         sample = "x" * 250
@@ -250,10 +424,9 @@ def _run_self_test() -> int:
             print("[self-test] FAIL replay helper called stopStream with ts=None")
     finally:
         _demo_agent_mod.time.sleep = orig_sleep
+        _demo_agent_mod.stream_reply = orig_stream_reply
 
     # Drop handler: happy path + ts=None no-op + SlackApiError swallowed.
-    from slack_sdk.errors import SlackApiError
-
     class _FakeResponse(dict):
         def __init__(self, data: dict) -> None:
             super().__init__(data)
@@ -376,7 +549,7 @@ def _run_self_test() -> int:
         fail += 1
         print(f"[self-test] FAIL user identity on error → {name_c!r}")
 
-    total = len(fixtures) + len(decision_cases) + 2 + 3 + 4
+    total = len(fixtures) + len(decision_cases) + len(final_classifier_cases) + 3 + 2 + 3 + 4
     print(f"\nself-test: {total - fail} pass / {fail} fail")
     return 1 if fail else 0
 

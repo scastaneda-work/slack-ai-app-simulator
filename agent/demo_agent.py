@@ -225,6 +225,17 @@ def _sanitize_user_name(name: str) -> str:
     return cleaned[:80]
 
 
+def _has_blockkit_candidate(text: str) -> bool:
+    """Return True when a completed reply should go through the Block Kit path.
+
+    Streaming detection searches for a ```blockkit fence anywhere in the buffer.
+    Keep final-result detection aligned with that behavior so terminal-only CLI
+    results do not leak raw fenced JSON just because the model added a preface.
+    """
+    _, tier = _extract_blockkit_json(text)
+    return tier != "no_fence"
+
+
 class Simulator:
     def __init__(self, *, stream: bool = True):
         cfg = load_app_config()
@@ -798,7 +809,7 @@ class Simulator:
         # `result` event (no incremental deltas), detect_phase never flipped.
         # Re-inspect the full text now.
         if detect_phase and self.blockkit_enabled:
-            is_blockkit = full_text.lstrip().startswith("```blockkit")
+            is_blockkit = _has_blockkit_candidate(full_text)
 
         # Block Kit path: parse the fence, wait out the floor, post as blocks.
         if is_blockkit:
@@ -827,7 +838,11 @@ class Simulator:
                     err = e.response.get("error")
                     log.error("chat.postMessage (blocks) failed: %s", err)
                     audit_log(f":warning: {self.display_name} blocks post rejected → `{err}`")
-                    self._post(channel, thread_ts, full_text)
+                    self._post(
+                        channel,
+                        thread_ts,
+                        "Sorry, I built the card but Slack rejected it. Try again?",
+                    )
             else:
                 failure_class = "schema_error" if violations else tier
                 detail = (
