@@ -9,3 +9,4 @@ agent/personas/*.md
 examples/demo_prompts_generated.md
 .DS_Store
 .claude/
+.simulator.lock

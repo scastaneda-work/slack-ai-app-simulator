@@ -281,6 +281,12 @@ Ask Claude Code *"edit the persona"* or directly edit `agent/personas/<your-app>
 
 **Socket Mode disconnected silently** — `slack_sdk.SocketModeClient` auto-reconnects, but messages sent during the dead window are **not** replayed. If the bot misses a message, just re-send it.
 
+**Bot seems to receive my message but never replies** — Re-run with `./run_app.sh --debug` and search the log for the raw Socket Mode event payload. If the event arrived but the bot didn't respond, the most common cause is an event with `bot_id` set that the filter should be passing through but isn't. Check that you haven't edited `agent/demo_agent.py` to re-introduce a blanket `if event.get("bot_id"): return` — see `CLAUDE.md` "Known persona pitfalls."
+
+**"ERROR: Another simulator instance is already running (PID ...)"** — A second `./run_app.sh` can't run while a first is live. Either stop the first (`Ctrl+C` in that Terminal) or `kill <PID>`, then start again. This guard prevents two instances from racing over the Socket Mode connection (Slack delivers events to the last-connected instance, which creates baffling "the bot answered once then stopped" bugs).
+
+**I renamed the bot but Slack's typing indicator still shows the old name** — The typing indicator uses the bot's Slack profile `real_name`, which isn't controlled by `config/app_config.json` `display_name` or the manifest. To change it, go to **api.slack.com → your app → Bot User → Edit** and update the name there. Calling `users.profile.set` from code does not work for bot tokens (it returns `not_allowed_token_type`).
+
 ---
 
 ## Windows commands

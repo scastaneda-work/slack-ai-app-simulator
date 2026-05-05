@@ -12,8 +12,10 @@ keys in this process.
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import logging
+import os
 import random
 import re
 import sys
@@ -36,6 +38,7 @@ from config import agent_bot_client, audit_log, load_app_config, load_tokens  # 
 from agent.claude_subprocess import EMPTY_USAGE, one_shot, stream_reply  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
+LOCK_FILE = ROOT / ".simulator.lock"
 MAX_TURNS = 20
 STREAM_FLUSH_MS = 400
 STREAM_CHUNK_CHARS = 30
@@ -236,6 +239,49 @@ def _has_blockkit_candidate(text: str) -> bool:
     return tier != "no_fence"
 
 
+def _should_skip_event(
+    event: dict[str, Any], self_bot_user_id: str, self_bot_id: str | None
+) -> bool:
+    """Decide whether to ignore a Slack event before running the reply pipeline.
+
+    Returns True for events we should drop (our own echoes, Slack edits/deletes).
+    Returns False for events we should respond to.
+
+    Crucial detail: admin-token posts (when a real user sends a message via an
+    xoxp- token with admin scopes) arrive with `bot_id` set to the *Slack Admin
+    app's* bot id — not ours. A naive "skip any event with bot_id" filter
+    silently drops these and the app appears to ignore the user. Only filter
+    on `bot_id` when it matches *our own* bot_id (echo prevention).
+    """
+    if event.get("user") == self_bot_user_id:
+        return True
+    if self_bot_id and event.get("bot_id") == self_bot_id:
+        return True
+    # NOTE: do NOT filter subtype == "bot_message" wholesale — admin-token
+    # posts carry that subtype. Only drop Slack's own edit/delete events.
+    if event.get("subtype") in {"message_changed", "message_deleted"}:
+        return True
+    return False
+
+
+def _acquire_lock() -> bool:
+    """Return True if we got the instance lock, False if another live instance
+    holds it. Stale locks (PID is not running anymore) are silently reclaimed."""
+    if LOCK_FILE.exists():
+        try:
+            pid = int(LOCK_FILE.read_text().strip())
+            os.kill(pid, 0)
+            return False
+        except (OSError, ValueError):
+            pass
+    LOCK_FILE.write_text(str(os.getpid()))
+    return True
+
+
+def _release_lock() -> None:
+    LOCK_FILE.unlink(missing_ok=True)
+
+
 class Simulator:
     def __init__(self, *, stream: bool = True):
         cfg = load_app_config()
@@ -279,6 +325,15 @@ class Simulator:
         self.team_id: str = tokens["team_id"]
         self.web: WebClient = agent_bot_client()
         self.app_token: str = agent_tokens["app_token"]
+
+        # Resolve our own bot_id so we can filter echoes from this app
+        # without dropping events from OTHER apps. Admin-token posts arrive
+        # with bot_id set to the Slack Admin app, not ours — see
+        # _should_skip_event and SETUP.md Troubleshooting.
+        try:
+            self.bot_id: str | None = self.web.auth_test().get("bot_id")
+        except SlackApiError:
+            self.bot_id = None
 
         self.history: dict[tuple[str, str], list[dict[str, str]]] = defaultdict(list)
         self.history_lock = Lock()
@@ -390,9 +445,7 @@ class Simulator:
             self.thread_context.pop((channel, thread_ts), None)
 
     def _handle_message(self, event: dict[str, Any], *, is_dm: bool) -> None:
-        if event.get("user") == self.bot_user_id:
-            return
-        if event.get("bot_id") or event.get("subtype") in {"bot_message", "message_changed", "message_deleted"}:
+        if _should_skip_event(event, self.bot_user_id, self.bot_id):
             return
 
         user_id = event.get("user")
@@ -952,6 +1005,16 @@ def main() -> int:
         level=logging.DEBUG if args.debug else logging.INFO,
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     )
+
+    if not _acquire_lock():
+        pid = LOCK_FILE.read_text().strip()
+        print(
+            f"ERROR: Another simulator instance is already running (PID {pid}).\n"
+            f"Stop it first (Ctrl+C in that Terminal) or run: kill {pid}",
+            file=sys.stderr,
+        )
+        return 1
+    atexit.register(_release_lock)
 
     Simulator(stream=not args.no_stream).run()
     return 0

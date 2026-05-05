@@ -164,6 +164,14 @@ The Formatting and Behavior rules above encode runtime learnings the simulator h
 | Model asks "who are you?" on "my priorities" style questions | System prompt tells the bot the user's name at runtime; persona says never ask |
 | Block Kit JSON > Slack schema limits | Runtime validates and audit-logs violations; persona caps sections at 6 |
 
+Runtime pitfalls (not persona-related, but worth naming here so you don't regress them when editing `agent/demo_agent.py`):
+
+| Pitfall | Rule in the code |
+|---|---|
+| Bot's "is typing…" name doesn't match `display_name` in `app_config.json` | Typing indicator uses the bot's Slack profile `real_name` — rename via api.slack.com → Bot User → Edit. Not fixable from code (bot tokens can't call `users.profile.set`) |
+| Admin-token or service-app posts arrive with a `bot_id` set and get silently dropped | `_should_skip_event` compares `bot_id` to *our own* `self.bot_id` only. Do NOT regress by re-adding `if event.get("bot_id"): return`. QA fixtures guard this |
+| Two simulator instances fight over the Socket Mode connection | `main()` uses a PID lock at `.simulator.lock`; stale locks are auto-reclaimed. Don't remove the lock without a plan for this |
+
 If a new failure mode comes up in live use, the fix belongs in both places: the **persona template here** (so new installs bake it in) AND the **QA fixtures in `agent/qa.py`** (so `--self-test` catches regressions).
 
 ### Step 9 — Vet the demo prompts

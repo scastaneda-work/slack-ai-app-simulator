@@ -49,6 +49,7 @@ from demo_agent import (  # noqa: E402
     _blockkit_decision,
     _extract_blockkit_json,
     _has_blockkit_candidate,
+    _should_skip_event,
     _validate_blocks,
 )
 
@@ -234,6 +235,57 @@ def _run_self_test() -> int:
         ok = got == expected
         status = "OK  " if ok else "FAIL"
         print(f"[self-test] {status} final classifier: {label} → {got} (want {expected})")
+        if not ok:
+            fail += 1
+
+    # Event filter. The pitfall: admin-token posts arrive with `bot_id` set
+    # to the Slack Admin app's id, not ours. A naive "drop any bot_id" filter
+    # silently ignores those events and the app appears not to respond. These
+    # fixtures guard against that regression.
+    OUR_BOT_USER = "UOURBOT"
+    OUR_BOT_ID = "BOURBOT"
+    event_filter_cases: list[tuple[str, dict, bool]] = [
+        (
+            "real user message",
+            {"user": "UHUMAN", "text": "hi", "channel": "C1"},
+            False,
+        ),
+        (
+            "our own echo (by user id)",
+            {"user": OUR_BOT_USER, "text": "(my own post)", "channel": "C1"},
+            True,
+        ),
+        (
+            "our own echo (by bot_id)",
+            {"user": OUR_BOT_USER, "bot_id": OUR_BOT_ID, "text": "echo", "channel": "C1"},
+            True,
+        ),
+        (
+            "admin-token user post — MUST RESPOND",
+            {"user": "UHUMAN", "bot_id": "BADMINAPP", "text": "<@UOURBOT> help", "channel": "C1"},
+            False,
+        ),
+        (
+            "other app's message — respond (or let text-filter handle it later)",
+            {"user": "UOTHERBOT", "bot_id": "BOTHERAPP", "text": "status update", "channel": "C1"},
+            False,
+        ),
+        (
+            "message_changed edit — skip",
+            {"user": "UHUMAN", "subtype": "message_changed", "text": "edited", "channel": "C1"},
+            True,
+        ),
+        (
+            "message_deleted — skip",
+            {"user": "UHUMAN", "subtype": "message_deleted", "text": "", "channel": "C1"},
+            True,
+        ),
+    ]
+    for label, ev, expected in event_filter_cases:
+        got = _should_skip_event(ev, OUR_BOT_USER, OUR_BOT_ID)
+        ok = got == expected
+        status = "OK  " if ok else "FAIL"
+        print(f"[self-test] {status} event filter: {label} → skip={got} (want skip={expected})")
         if not ok:
             fail += 1
 
@@ -549,7 +601,13 @@ def _run_self_test() -> int:
         fail += 1
         print(f"[self-test] FAIL user identity on error → {name_c!r}")
 
-    total = len(fixtures) + len(decision_cases) + len(final_classifier_cases) + 3 + 2 + 3 + 4
+    total = (
+        len(fixtures)
+        + len(decision_cases)
+        + len(final_classifier_cases)
+        + len(event_filter_cases)
+        + 3 + 2 + 3 + 4
+    )
     print(f"\nself-test: {total - fail} pass / {fail} fail")
     return 1 if fail else 0
 
