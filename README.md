@@ -1,6 +1,13 @@
 # slack-ai-app-simulator
 
-Spin up a Slack app that simulates **any** AI app from the marketplace — Claude, Asana AI, Notion AI, Cursor, Glean, whatever — for live demos. You configure it by talking to Claude Code.
+## About
+
+**slack-ai-app-simulator** lets Slack Solution Engineers spin up a Slack bot that impersonates any AI marketplace app — Claude, Asana AI, Notion AI, Cursor, Glean, and more — for live customer demos.
+
+- **No API keys.** Runs entirely through your local `claude` CLI (the same Claude Code you're using right now).
+- **No coding required.** An onboarding wizard inside Claude Code handles all configuration via conversation.
+- **Any app, any persona.** One conversation generates the persona, Slack app manifest, and vetted demo prompts for whatever app you're simulating.
+- **One command to start.** After setup, `./run_app.sh` brings the bot online in ~3 seconds.
 
 Setup is one-time, ~15 minutes. After that, each demo takes one command to start.
 
