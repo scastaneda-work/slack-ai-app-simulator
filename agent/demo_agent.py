@@ -36,10 +36,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from config import agent_bot_client, audit_log, load_app_config, load_tokens  # noqa: E402
 from agent.claude_subprocess import EMPTY_USAGE, one_shot, stream_reply  # noqa: E402
+from agent.retry import retry_on_rate_limit  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 LOCK_FILE = ROOT / ".simulator.lock"
 MAX_TURNS = 20
+# Belt-and-suspenders cap on prompt size: even within MAX_TURNS, a long-form
+# thread can balloon past what the local `claude` CLI handles cleanly. Trim
+# the oldest turns until the total content size fits.
+MAX_HISTORY_CHARS = 50_000
+# Slack's chat.postMessage rejects payloads with blocks JSON > ~50KB. Keep a
+# safety margin and fall back to plain text past this.
+MAX_BLOCKS_JSON_BYTES = 40_000
 STREAM_FLUSH_MS = 400
 STREAM_CHUNK_CHARS = 30
 LOADING_INTERVAL_MIN_S = 1.5
@@ -226,6 +234,40 @@ def _sanitize_user_name(name: str) -> str:
     cleaned = _NAME_BAD_CHARS.sub(" ", name).strip()
     cleaned = re.sub(r"\s+", " ", cleaned)
     return cleaned[:80]
+
+
+@retry_on_rate_limit()
+def _retrying_append_stream(web: WebClient, **kwargs: Any) -> Any:
+    return web.chat_appendStream(**kwargs)
+
+
+@retry_on_rate_limit()
+def _retrying_stop_stream(web: WebClient, **kwargs: Any) -> Any:
+    return web.chat_stopStream(**kwargs)
+
+
+def _blocks_too_large(blocks: list, max_bytes: int) -> bool:
+    """True when the JSON-encoded blocks list exceeds Slack's effective size
+    limit. Use UTF-8 byte length (Slack measures bytes, not characters)."""
+    try:
+        return len(json.dumps(blocks).encode("utf-8")) > max_bytes
+    except (TypeError, ValueError):
+        return True
+
+
+def _trim_history(messages: list[dict[str, str]], max_chars: int) -> list[dict[str, str]]:
+    """Drop oldest turns until total content size fits within ``max_chars``.
+
+    Always keeps the most recent message (the user turn we're about to answer)
+    so we never send an empty conversation. Callers should already have applied
+    the per-turn cap (MAX_TURNS) — this is a second guardrail for unusually
+    long individual messages."""
+    if not messages:
+        return messages
+    trimmed = list(messages)
+    while len(trimmed) > 1 and sum(len(m.get("content", "")) for m in trimmed) > max_chars:
+        trimmed.pop(0)
+    return trimmed
 
 
 def _has_blockkit_candidate(text: str) -> bool:
@@ -465,7 +507,7 @@ class Simulator:
         with self.history_lock:
             is_first_turn = len(self.history[key]) == 0
             self.history[key].append({"role": "user", "content": text})
-            messages = list(self.history[key][-MAX_TURNS:])
+            messages = _trim_history(self.history[key][-MAX_TURNS:], MAX_HISTORY_CHARS)
 
         ctx_channel = self.thread_context.get(key)
         system_prompt = self.system_prompt
@@ -606,8 +648,8 @@ class Simulator:
                 final_chunk = chunk
                 break
             try:
-                self.web.chat_appendStream(
-                    channel=channel, ts=ts, markdown_text=chunk
+                _retrying_append_stream(
+                    self.web, channel=channel, ts=ts, markdown_text=chunk
                 )
             except SlackApiError as e:
                 err = e.response.get("error")
@@ -630,7 +672,7 @@ class Simulator:
             stop_kwargs: dict[str, Any] = {"channel": channel, "ts": ts}
             if final_chunk:
                 stop_kwargs["markdown_text"] = final_chunk
-            self.web.chat_stopStream(**stop_kwargs)
+            _retrying_stop_stream(self.web, **stop_kwargs)
         except SlackApiError as e:
             err = e.response.get("error")
             hints = e.response.get("response_metadata", {}).get("messages") or []
@@ -652,14 +694,14 @@ class Simulator:
         tail = "\n\n_(connection dropped — please ask again)_"
         try:
             if buf:
-                self.web.chat_appendStream(channel=channel, ts=ts, markdown_text=buf)
+                _retrying_append_stream(self.web, channel=channel, ts=ts, markdown_text=buf)
         except SlackApiError as e:
             err = e.response.get("error")
             hints = e.response.get("response_metadata", {}).get("messages") or []
             log.error("drop-finalize appendStream failed: %s (%s)", err, hints)
         try:
-            self.web.chat_stopStream(
-                channel=channel, ts=ts, markdown_text=tail
+            _retrying_stop_stream(
+                self.web, channel=channel, ts=ts, markdown_text=tail
             )
         except SlackApiError as e:
             err = e.response.get("error")
@@ -727,7 +769,8 @@ class Simulator:
             if not buf or ts is None:
                 return
             try:
-                self.web.chat_appendStream(
+                _retrying_append_stream(
+                    self.web,
                     channel=channel,
                     ts=ts,
                     markdown_text=buf,
@@ -871,6 +914,12 @@ class Simulator:
             if violations:
                 log.warning("blockkit schema violations (tier=%s): %s", tier, violations)
                 blocks = None
+            if blocks and _blocks_too_large(blocks, MAX_BLOCKS_JSON_BYTES):
+                audit_log(
+                    f":warning: {self.display_name} Block Kit card exceeded "
+                    f"{MAX_BLOCKS_JSON_BYTES}-byte payload limit. Falling back to plain text."
+                )
+                blocks = None
             remaining = floor_s - (time.monotonic() - t_start)
             if remaining > 0:
                 time.sleep(remaining)
@@ -974,6 +1023,12 @@ class Simulator:
             violations = _validate_blocks(blocks) if blocks else []
             if violations:
                 log.warning("blockkit schema violations (tier=%s): %s", tier, violations)
+                blocks = None
+            if blocks and _blocks_too_large(blocks, MAX_BLOCKS_JSON_BYTES):
+                audit_log(
+                    f":warning: {self.display_name} Block Kit card exceeded "
+                    f"{MAX_BLOCKS_JSON_BYTES}-byte payload limit. Falling back to plain text."
+                )
                 blocks = None
         if blocks:
             try:
