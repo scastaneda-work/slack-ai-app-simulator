@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import fcntl
 import json
 import logging
 import os
@@ -24,7 +25,7 @@ import traceback
 from collections import defaultdict
 from pathlib import Path
 from threading import Event, Lock, Thread
-from typing import Any
+from typing import IO, Any
 
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
@@ -306,21 +307,44 @@ def _should_skip_event(
     return False
 
 
+_lock_handle: IO[Any] | None = None
+
+
 def _acquire_lock() -> bool:
     """Return True if we got the instance lock, False if another live instance
-    holds it. Stale locks (PID is not running anymore) are silently reclaimed."""
-    if LOCK_FILE.exists():
-        try:
-            pid = int(LOCK_FILE.read_text().strip())
-            os.kill(pid, 0)
-            return False
-        except (OSError, ValueError):
-            pass
-    LOCK_FILE.write_text(str(os.getpid()))
+    holds it.
+
+    Uses ``fcntl.flock`` for atomic acquisition — both processes calling
+    flock() at the same time is well-defined: the kernel hands the lock to
+    exactly one. Stale locks (process exited without releasing) are reclaimed
+    automatically because the OS drops the file lock when the holding process
+    dies, so the next instance's flock() succeeds without us doing anything.
+    The PID written into the file is purely informational for the error message.
+    """
+    global _lock_handle
+    handle = open(LOCK_FILE, "a+")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return False
+    handle.seek(0)
+    handle.truncate()
+    handle.write(str(os.getpid()))
+    handle.flush()
+    _lock_handle = handle
     return True
 
 
 def _release_lock() -> None:
+    global _lock_handle
+    if _lock_handle is not None:
+        try:
+            fcntl.flock(_lock_handle.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        _lock_handle.close()
+        _lock_handle = None
     LOCK_FILE.unlink(missing_ok=True)
 
 

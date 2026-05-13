@@ -31,6 +31,29 @@ EMPTY_USAGE: dict[str, int] = {
 }
 
 
+def _build_env() -> dict[str, str]:
+    """Build a minimal environment for the `claude` subprocess.
+
+    Forwarding the full parent env leaks every variable in the SE's shell
+    (AWS keys, GitHub tokens, demo secrets) into a child process whose stderr
+    we capture and audit-log. Pass only what `claude` actually needs:
+      - PATH, HOME, SHELL, USER: standard tooling
+      - LANG / LC_*: terminal encoding
+      - ANTHROPIC_*, AWS_*, CLAUDE_*: claude's own auth + behavior knobs
+        (the SE may have any of these set in their shell to point at a
+        non-default gateway / region / model)
+      - NODE_*, NPM_*: claude is a Node CLI; respect npm config
+    """
+    keep_keys = {"PATH", "HOME", "SHELL", "USER", "TERM", "LANG", "TMPDIR", "PWD"}
+    keep_prefixes = ("LC_", "ANTHROPIC_", "AWS_", "CLAUDE_", "NODE_", "NPM_")
+    env: dict[str, str] = {}
+    for key, value in os.environ.items():
+        if key in keep_keys or key.startswith(keep_prefixes):
+            env[key] = value
+    env["CLAUDE_CODE_SIMPLE"] = "1"
+    return env
+
+
 def _format_prompt(messages: list[dict[str, str]]) -> str:
     """Flatten conversation history into one prompt string.
 
@@ -94,7 +117,7 @@ def stream_reply(
         stderr=subprocess.PIPE,
         text=True,
         bufsize=1,
-        env={**os.environ, "CLAUDE_CODE_SIMPLE": "1"},
+        env=_build_env(),
     )
 
     final_parts: list[str] = []
@@ -152,7 +175,7 @@ def one_shot(*, model: str, system_prompt: str, user_text: str, timeout: int = 6
         capture_output=True,
         text=True,
         timeout=timeout,
-        env={**os.environ, "CLAUDE_CODE_SIMPLE": "1"},
+        env=_build_env(),
     )
     if result.returncode != 0:
         raise RuntimeError(
