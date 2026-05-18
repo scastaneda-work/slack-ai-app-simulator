@@ -18,10 +18,25 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import subprocess
+import time
 from collections.abc import Iterator
 
 log = logging.getLogger("claude_subprocess")
+
+# Total wall-clock budget for a single stream_reply call. The local `claude`
+# CLI normally finishes within seconds; if the gateway hangs, kill the
+# subprocess so the Slack listener thread doesn't pile up zombies.
+STREAM_TIMEOUT_S = 120
+
+# Resolve `claude` once at import time. Catches "claude isn't on PATH" early
+# (clearer error than a per-request Popen failure) and avoids re-resolving
+# every reply. shutil.which respects the SE's actual PATH at start-up; later
+# PATH changes don't affect us.
+_CLAUDE_PATH = shutil.which("claude")
+if _CLAUDE_PATH is None:
+    log.warning("`claude` not found on PATH. Install Claude Code or check your shell init.")
 
 EMPTY_USAGE: dict[str, int] = {
     "input_tokens": 0,
@@ -35,17 +50,25 @@ def _build_env() -> dict[str, str]:
     """Build a minimal environment for the `claude` subprocess.
 
     Forwarding the full parent env leaks every variable in the SE's shell
-    (AWS keys, GitHub tokens, demo secrets) into a child process whose stderr
-    we capture and audit-log. Pass only what `claude` actually needs:
+    (GitHub tokens, demo secrets, raw AWS credentials) into a child process
+    whose stderr we capture and audit-log. Pass only what `claude` actually
+    needs:
       - PATH, HOME, SHELL, USER: standard tooling
       - LANG / LC_*: terminal encoding
-      - ANTHROPIC_*, AWS_*, CLAUDE_*: claude's own auth + behavior knobs
+      - ANTHROPIC_*, CLAUDE_*: claude's own auth + behavior knobs
         (the SE may have any of these set in their shell to point at a
         non-default gateway / region / model)
       - NODE_*, NPM_*: claude is a Node CLI; respect npm config
+
+    AWS env: claude needs AWS_REGION/AWS_PROFILE if the SE is using Bedrock,
+    but raw AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN aren't ours to forward.
+    Allowlist the harmless region/profile vars only.
     """
-    keep_keys = {"PATH", "HOME", "SHELL", "USER", "TERM", "LANG", "TMPDIR", "PWD"}
-    keep_prefixes = ("LC_", "ANTHROPIC_", "AWS_", "CLAUDE_", "NODE_", "NPM_")
+    keep_keys = {
+        "PATH", "HOME", "SHELL", "USER", "TERM", "LANG", "TMPDIR", "PWD",
+        "AWS_REGION", "AWS_DEFAULT_REGION", "AWS_PROFILE",
+    }
+    keep_prefixes = ("LC_", "ANTHROPIC_", "CLAUDE_", "NODE_", "NPM_")
     env: dict[str, str] = {}
     for key, value in os.environ.items():
         if key in keep_keys or key.startswith(keep_prefixes):
@@ -73,8 +96,12 @@ def _format_prompt(messages: list[dict[str, str]]) -> str:
 def _build_command(
     *, model: str, system_prompt: str, prompt: str, stream: bool
 ) -> list[str]:
+    if _CLAUDE_PATH is None:
+        raise RuntimeError(
+            "`claude` not found on PATH. Install Claude Code or check your shell."
+        )
     cmd = [
-        "claude",
+        _CLAUDE_PATH,
         "-p", prompt,
         "--model", model,
         "--system-prompt", system_prompt,
@@ -122,10 +149,21 @@ def stream_reply(
 
     final_parts: list[str] = []
     got_result = False
+    deadline = time.monotonic() + STREAM_TIMEOUT_S
+    timed_out = False
 
     try:
         assert proc.stdout is not None
         for line in proc.stdout:
+            # Wall-clock timeout check between lines. The CLI normally
+            # finishes well within the budget; a hung gateway is the only
+            # realistic way we get here. Kill the subprocess so the Slack
+            # listener thread can move on.
+            if time.monotonic() > deadline:
+                timed_out = True
+                proc.kill()
+                yield ("error", f"timeout after {STREAM_TIMEOUT_S}s")
+                return
             line = line.strip()
             if not line:
                 continue
@@ -159,6 +197,8 @@ def stream_reply(
         except subprocess.TimeoutExpired:
             proc.kill()
             rc = -1
+        if timed_out:
+            return  # already yielded the error above
         if rc != 0 and not got_result:
             stderr_tail = ""
             if proc.stderr is not None:
