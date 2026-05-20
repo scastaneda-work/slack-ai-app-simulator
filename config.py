@@ -47,6 +47,14 @@ def load_app_config() -> dict[str, Any]:
 
     Missing file means onboarding hasn't run — tell the user to open this folder
     in Claude Code and say 'help me set this up.'
+
+    Two supported shapes:
+      Single-persona (default): a flat dict with `app_name`, `display_name`,
+        `persona_path`, etc.
+      Multi-persona (opt-in): a dict with a top-level `personas` key mapping
+        slug → flat config. The active persona is chosen by the SIM_PERSONA
+        env var; if unset, the entry marked `"default": true` wins, or the
+        first entry if none is marked.
     """
     if not APP_CONFIG_PATH.exists():
         raise RuntimeError(
@@ -54,7 +62,31 @@ def load_app_config() -> dict[str, Any]:
             "folder in Claude Code and say 'help me set this up.'"
         )
     with APP_CONFIG_PATH.open() as f:
-        return json.load(f)
+        raw = json.load(f)
+
+    personas = raw.get("personas")
+    if not isinstance(personas, dict) or not personas:
+        return raw
+
+    requested = os.environ.get("SIM_PERSONA")
+    if requested:
+        if requested not in personas:
+            available = ", ".join(sorted(personas))
+            raise RuntimeError(
+                f"SIM_PERSONA={requested!r} not found in {APP_CONFIG_PATH}. "
+                f"Available: {available}."
+            )
+        chosen = personas[requested]
+    else:
+        defaults = [k for k, v in personas.items() if isinstance(v, dict) and v.get("default")]
+        if defaults:
+            chosen = personas[defaults[0]]
+        else:
+            chosen = next(iter(personas.values()))
+
+    if not isinstance(chosen, dict):
+        raise RuntimeError(f"Persona entry in {APP_CONFIG_PATH} is not an object.")
+    return chosen
 
 
 def agent_bot_client() -> WebClient:

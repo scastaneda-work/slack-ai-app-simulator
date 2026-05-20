@@ -1,0 +1,34 @@
+{
+  "_comment": "Multi-persona shape — opt-in. Pick which persona runs by setting SIM_PERSONA=<slug>. If unset, the simulator picks the entry marked default: true (or the first entry if none is marked).",
+  "personas": {
+    "claudesim": {
+      "default": true,
+      "app_name": "ClaudeSim",
+      "display_name": "ClaudeSim",
+      "simulates": "Claude (Anthropic)",
+      "model": "claude-sonnet-4-6",
+      "loading_messages": [
+        "is thinking...",
+        "is drafting a response...",
+        "is considering...",
+        "is composing..."
+      ],
+      "persona_path": "agent/personas/claudesim.md",
+      "blockkit_enabled": false
+    },
+    "asanasim": {
+      "app_name": "AsanaSim",
+      "display_name": "AsanaSim",
+      "simulates": "Asana AI",
+      "model": "claude-sonnet-4-6",
+      "loading_messages": [
+        "is reading the board...",
+        "is checking tasks...",
+        "is pulling the latest...",
+        "is drafting a reply..."
+      ],
+      "persona_path": "agent/personas/asanasim.md",
+      "blockkit_enabled": true
+    }
+  }
+}

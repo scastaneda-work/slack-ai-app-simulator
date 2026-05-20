@@ -70,6 +70,10 @@ No API keys in this project. Your local Claude Code install handles authenticati
 
 Open this folder in Claude Code and say *"I want to simulate a different app"*. Claude will walk you through restarting the wizard with a fresh persona.
 
+## Running more than one persona from the same clone
+
+Once you've done the wizard once, you can add additional personas without re-running it: copy `agent/personas/_template.md.template` to `agent/personas/<new-slug>.md`, fill in the placeholders, and switch `config/app_config.json` to the multi-persona shape shown in `config/app_config.example.multi.json`. Pick which persona runs at launch with `SIM_PERSONA=<slug> ./run_app.sh`. See `SETUP.md` "Adding a second persona" for the full walkthrough.
+
 ## Stopping and restarting
 
 | What happened | What to do |

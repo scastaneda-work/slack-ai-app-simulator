@@ -271,6 +271,31 @@ Ask Claude Code *"edit the persona"* or directly edit `agent/personas/<your-app>
 
 ---
 
+## Adding a second persona (optional)
+
+You can keep multiple personas in the same clone and switch between them without re-running the wizard. Useful if you demo Claude one week and Asana the next.
+
+1. **Add the new persona file** — copy `agent/personas/_template.md.template` to `agent/personas/<new-slug>.md` and fill in the placeholders (display name, what it simulates, persona body, sample answers).
+2. **Switch `config/app_config.json` to multi-persona shape.** See `config/app_config.example.multi.json` for the worked example. The shape is:
+   ```json
+   {
+     "personas": {
+       "claudesim":  { "default": true, "app_name": "...", "persona_path": "agent/personas/claudesim.md", ... },
+       "asanasim":   { "app_name": "...", "persona_path": "agent/personas/asanasim.md", ... }
+     }
+   }
+   ```
+   The single-persona shape (no `personas` key) keeps working unchanged — only switch when you actually have a second one.
+3. **Pick which persona runs** at launch with the `SIM_PERSONA` env var:
+   ```bash
+   SIM_PERSONA=asanasim ./run_app.sh
+   ```
+   With no env var, the simulator runs the entry marked `"default": true` (or the first entry if none is marked).
+
+Each persona still needs its own Slack app + tokens if you want them to appear as separate bots in Slack. If you want all personas to live behind one Slack app and only swap personality, that works too — same tokens, same `manifest.json`, just a different `SIM_PERSONA` at launch. Restart `./run_app.sh` after switching.
+
+---
+
 ## Troubleshooting
 
 **`claude: command not found`** — Claude Code isn't installed or isn't on your PATH. Install Claude Code. If `command -v claude` still fails after install, reopen your Terminal window (PATH updates don't apply to windows already open).
