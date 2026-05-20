@@ -1,6 +1,15 @@
 # slack-ai-app-simulator — Setup
 
-This guide takes you from a fresh clone to a working simulator in about 15 minutes. It's written for Slack Solution Engineers who are fluent in Slack but new to Terminal and Python.
+This guide takes you from a fresh clone to a working simulator in about 15 minutes. It's written for Slack Solution Engineers who are fluent in Slack but new to Terminal, Python, and building custom Slack apps.
+
+---
+
+## Two ways to follow this guide — pick whichever fits
+
+- **Open this folder in Claude Code and ask *"help me set this up."*** Claude reads this guide and `CLAUDE.md` and walks you through it one step at a time, pausing for your confirmation between steps and running the commands for you when it's safe to do so. **Best if you're new to Terminal or to building Slack apps** — at any point you can ask Claude to explain what a step does or why.
+- **Read it yourself.** The steps below assume you're comfortable opening a Terminal window, copy-pasting commands, and running them yourself.
+
+Either path uses the same instructions below. Each step is tagged with `[Claude Code]`, `[Terminal]`, or `[Slack web UI]` to tell you where to run it — those tags are explained in the primer below.
 
 ---
 
@@ -26,6 +35,8 @@ Replace `path/to/` with wherever you cloned/downloaded it (e.g., `cd ~/claude-pr
 **About the `claude` CLI.** This simulator sends every reply through your local Claude Code install — specifically, the `claude` command it puts on your system. If you can type `claude` in a Terminal and have Claude Code launch, this project will work. No extra API keys needed.
 
 **About `.venv` (Python virtual environment).** Step 2 creates a folder called `.venv` inside the project. It's a private, sandboxed copy of Python just for this project — installing packages here won't affect the rest of your system.
+
+> ℹ **Stuck on any step?** If you're following this through Claude Code, just ask — *"what does this step do?"*, *"why am I doing this?"*, or *"that didn't work, here's what I see"* are all fair game. The whole point of the Claude Code path is that you don't have to figure anything out alone.
 
 ---
 
@@ -139,7 +150,7 @@ Open a Terminal window (or reuse the one from Step 2), `cd` to this folder, and 
 .venv/bin/python tokens/save_app_token.py
 ```
 
-It'll ask you to paste the `xapp-` token. **Your keystrokes won't appear on screen — that's intentional** (`getpass` hides token input so it doesn't end up in Terminal scrollback). Paste, press Enter, confirm with `y`.
+It'll ask you to paste the `xapp-` token. **Your keystrokes won't appear on screen — that's intentional, not a bug.** This uses `getpass`, a standard tool for accepting secrets like tokens without leaving them in your Terminal scrollback. Just paste, press Enter, and confirm with `y`.
 
 ---
 
@@ -203,7 +214,7 @@ You should see a banner like:
   ...
 ```
 
-followed by scope checks:
+followed by scope checks (scopes are the permissions your Slack app is allowed to use — e.g., posting messages, reading user profiles):
 
 ```
 bot scopes (6): assistant:write, chat:write, chat:write.customize, ...
@@ -223,7 +234,7 @@ To stop the app cleanly, press `Ctrl+C`. To restart after any change, `Ctrl+C` t
 1. In Slack, open a DM with your bot (search for it by display name). Send "hi".
 2. Within ~2 seconds you should see a loading indicator rotate under the bot's name: *"is thinking..."*, then *"is drafting..."*, etc.
 3. After ~7–10 seconds a streamed reply should appear.
-4. If your bot has Block Kit enabled (Asana-style), ask it something structured like "show me the blockers" or "give me a status summary" — the reply should render as a card, not raw JSON.
+4. If your bot has Block Kit enabled (Block Kit is Slack's structured-card renderer — the thing that turns JSON into nice-looking message cards, Asana-style), ask it something structured like "show me the blockers" or "give me a status summary" — the reply should render as a card, not raw JSON.
 5. Invite the bot to any channel (`/invite @<display_name>`), then `@<display_name> ping`. A reply should appear in-thread.
 
 If any of those fail, check your audit channel (if you set one up). Each error logs a specific reason.

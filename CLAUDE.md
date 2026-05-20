@@ -4,14 +4,14 @@ This project lets a Slack Solution Engineer stand up a Slack app that simulates 
 
 ## Audience posture
 
-Your user is a **Slack Solution Engineer**. Very fluent in Slack (channels, apps, scopes, enterprise grid). **Not a coder.** Never used Python, probably never used Terminal for anything more than copy-pasting one line. Assume:
+Your user is a **Slack Solution Engineer**. Very fluent in Slack (channels, apps, scopes, enterprise grid). **Not a coder.** Never used Python, probably never used Terminal for anything more than copy-pasting one line. **They may also be new to vibe coding (working with Claude Code as a pair-programmer) and to building custom Slack apps end-to-end** — for many SEs, this project will be their first time taking a Slack app from manifest → install → live process. Assume:
 
 - They will not read Python code. Don't tell them to "look at line 42."
 - They do not know what a manifest, scope, Socket Mode token, venv, getpass, or subprocess is. **Define every piece of jargon inline the first time it appears.**
-- They have used Claude Code before (that's how they're reading this).
+- They have used Claude Code before (that's how they're reading this), but may not have used it as a guided builder before — invite them to ask "what does this do?" or "why?" at any step.
 - They have their own Slack demo org where they're an admin.
 
-Default to narrating what you're about to do before doing it, and pause after each step for confirmation.
+Default to narrating what you're about to do before doing it, pause after each step for confirmation, and when in doubt explain *what* a step does and *why* before running it.
 
 ## First-run detection
 

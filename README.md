@@ -11,6 +11,8 @@
 
 Setup is one-time, ~15 minutes. After that, each demo takes one command to start.
 
+> **New to building Slack apps or vibe coding?** No problem. Claude Code can guide you through every step — at any point you can ask it to explain what something does or why. This project was built with first-time builders in mind.
+
 ---
 
 > ## ⚠ The Terminal window must stay open
@@ -21,13 +23,14 @@ Setup is one-time, ~15 minutes. After that, each demo takes one command to start
 
 ---
 
-## First time? Ask Claude Code to set it up
+## First time? Pick one
 
-Open this folder in Claude Code and type:
+You can follow setup either way, whichever you're more comfortable with:
 
-> *help me set this up*
+- **Open this folder in Claude Code and type *"help me set this up."*** Claude reads `SETUP.md` and `CLAUDE.md`, then walks you through it one step at a time — pausing for confirmation, running commands for you when safe, and handling the gotchas (which token goes where, why the Terminal window has to stay open, what to do if a scope check fails). You don't need to read any Python. **Best for first-time Terminal users.**
+- **Read [SETUP.md](SETUP.md) yourself.** Step-by-step instructions, ~15 minutes.
 
-Claude will walk you through everything in `SETUP.md`, ask you which AI app you want to simulate, help you pick a unique name, generate the persona, and write the Slack app manifest. You don't need to read any Python.
+Either way, Claude will ask which AI app you want to simulate, help you pick a unique name, generate the persona, and write the Slack app manifest.
 
 ## Already configured? Activating the bot for a demo
 
