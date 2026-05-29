@@ -48,9 +48,12 @@ from demo_agent import (  # noqa: E402
     Simulator,
     _blockkit_decision,
     _extract_blockkit_json,
+    _extract_taskplan_json,
     _has_blockkit_candidate,
+    _render_taskplan_chunks,
     _should_skip_event,
     _validate_blocks,
+    _validate_taskplan,
 )
 
 
@@ -320,23 +323,26 @@ def _run_self_test() -> int:
     orig_stream_reply = _demo_agent_mod.stream_reply
     _demo_agent_mod.time.sleep = lambda _s: None
     try:
-        def _make_stream_shim(web, *, blockkit_enabled: bool = True):
+        def _make_stream_shim(web, *, blockkit_enabled: bool = True, taskplan_enabled: bool = False):
             shim = object.__new__(Simulator)
             shim.web = web
             shim.display_name = "TestBot"
             shim.team_id = "T123"
             shim.model = "test-model"
             shim.blockkit_enabled = blockkit_enabled
+            shim.taskplan_enabled = taskplan_enabled
             shim.stream = True
             return shim
 
-        def _run_stream_case(events, *, blockkit_enabled: bool = True):
+        def _run_stream_case(events, *, blockkit_enabled: bool = True, taskplan_enabled: bool = False):
             def fake_stream_reply(**_kwargs):
                 yield from events
 
             _demo_agent_mod.stream_reply = fake_stream_reply
             web_case = _RecWeb()
-            shim_case = _make_stream_shim(web_case, blockkit_enabled=blockkit_enabled)
+            shim_case = _make_stream_shim(
+                web_case, blockkit_enabled=blockkit_enabled, taskplan_enabled=taskplan_enabled
+            )
             reply, _usage = Simulator._stream_reply(
                 shim_case,
                 "C123",
@@ -449,6 +455,41 @@ def _run_self_test() -> int:
                 f"block_attempts={len(reject_block_attempts)} "
                 f"fallbacks={len(reject_text_fallbacks)} "
                 f"raw_posts={len(reject_raw_posts)} reply_len={len(rejected_reply)}"
+            )
+
+        # Taskplan path: a taskplan-enabled persona should open the stream with
+        # task_display_mode, animate the steps, then finalize the SAME message
+        # with the answer text (no separate post, no raw taskplan JSON).
+        tp_reply, tp_calls = _run_stream_case(
+            [(
+                "final",
+                '```taskplan\n{"mode":"timeline","steps":['
+                '{"id":"1","title":"Searched","status":"complete"},'
+                '{"id":"2","title":"Synthesized","status":"complete"}]}'
+                '\n```\nThe answer is 42.',
+            )],
+            blockkit_enabled=False,
+            taskplan_enabled=True,
+        )
+        tp_starts = [
+            c for c in tp_calls
+            if c[0] == "startStream" and c[1].get("task_display_mode") == "timeline"
+        ]
+        tp_stops = [
+            c for c in tp_calls
+            if c[0] == "stopStream" and "The answer is 42." in c[1].get("markdown_text", "")
+        ]
+        tp_raw = [
+            c for c in tp_calls
+            if "```taskplan" in str(c[1].get("markdown_text", "") or c[1].get("text", ""))
+        ]
+        if tp_starts and tp_stops and not tp_raw:
+            print("[self-test] OK   stream reply: taskplan animates then finalizes answer")
+        else:
+            fail += 1
+            print(
+                "[self-test] FAIL taskplan stream: "
+                f"starts={len(tp_starts)} stops={len(tp_stops)} raw_leak={len(tp_raw)}"
             )
 
         web = _RecWeb()
@@ -601,11 +642,117 @@ def _run_self_test() -> int:
         fail += 1
         print(f"[self-test] FAIL user identity on error → {name_c!r}")
 
+    # Taskplan extractor: tiers + the plan/rest split (the answer text after
+    # the fence must survive so it can finalize the streamed message).
+    taskplan_cases: list[tuple[str, str, str, bool, int]] = [
+        # (label, raw, expected_tier, expect_rest_nonempty, expected_violations)
+        (
+            "strict timeline + answer",
+            '```taskplan\n{"mode":"timeline","title":"Researching",'
+            '"steps":[{"id":"1","title":"Searched docs","status":"complete"}]}'
+            '\n```\nHere is the answer.',
+            "strict", True, 0,
+        ),
+        (
+            "strict plan with sources",
+            '```taskplan\n{"mode":"plan","title":"Plan","steps":['
+            '{"id":"1","title":"Step one","status":"complete",'
+            '"sources":[{"url":"https://x.com","text":"X"}]}]}\n```\nAnswer body.',
+            "strict", True, 0,
+        ),
+        (
+            "trailing prose (lead-in before fence)",
+            'Let me work through this:\n\n```taskplan\n'
+            '{"mode":"timeline","steps":[{"id":"1","title":"a","status":"complete"}]}'
+            '\n```\nAnswer.',
+            "trailing_prose", True, 0,
+        ),
+        (
+            "no fence",
+            "Just a normal reply.",
+            "no_fence", True, 0,
+        ),
+        (
+            "parse error (bad json)",
+            '```taskplan\n{"mode":"timeline",,}\n```\nAnswer.',
+            "parse_error", True, 0,
+        ),
+        (
+            "schema: bad mode",
+            '```taskplan\n{"mode":"grid","steps":[{"id":"1","title":"a"}]}\n```',
+            "strict", False, 1,
+        ),
+        (
+            "schema: source missing text",
+            '```taskplan\n{"mode":"plan","title":"P","steps":[{"id":"1",'
+            '"title":"a","sources":[{"url":"https://x.com"}]}]}\n```',
+            "strict", False, 1,
+        ),
+        (
+            "schema: duplicate ids",
+            '```taskplan\n{"mode":"timeline","steps":['
+            '{"id":"1","title":"a"},{"id":"1","title":"b"}]}\n```',
+            "strict", False, 1,
+        ),
+    ]
+    for label, raw, exp_tier, exp_rest, exp_v in taskplan_cases:
+        plan, rest, tier = _extract_taskplan_json(raw)
+        violations = _validate_taskplan(plan) if plan else []
+        ok = (
+            tier == exp_tier
+            and (bool(rest.strip()) == exp_rest)
+            and len(violations) == exp_v
+        )
+        status = "OK  " if ok else "FAIL"
+        print(
+            f"[self-test] {status} taskplan: {label} → tier={tier} "
+            f"rest={'y' if rest.strip() else 'n'} violations={len(violations)}"
+        )
+        if not ok:
+            fail += 1
+
+    # Renderer: plan mode emits a leading plan_update frame; timeline does not.
+    taskplan_render_fail = 0
+    plan_plan = {"mode": "plan", "title": "Doing X", "steps": [
+        {"id": "1", "title": "a", "status": "complete"},
+        {"id": "2", "title": "b"},
+    ]}
+    frames_plan, mode_plan = _render_taskplan_chunks(plan_plan)
+    task_chunks = [c for f in frames_plan for c in f if c["type"] == "task_update"]
+    plan_ok = (
+        mode_plan == "plan"
+        and frames_plan[0][0]["type"] == "plan_update"
+        and frames_plan[0][0]["title"] == "Doing X"
+        and len(task_chunks) == 2
+        and task_chunks[1]["status"] == "complete"  # default when omitted
+    )
+    print(f"[self-test] {'OK  ' if plan_ok else 'FAIL'} taskplan render: plan mode title + 2 tasks")
+    if not plan_ok:
+        fail += 1
+        taskplan_render_fail += 1
+
+    tl = {"mode": "timeline", "steps": [
+        {"id": "1", "title": "a", "sources": [{"url": "https://x.com", "text": "X"}]},
+    ]}
+    frames_tl, mode_tl = _render_taskplan_chunks(tl)
+    tl_ok = (
+        mode_tl == "timeline"
+        and not any(c["type"] == "plan_update" for f in frames_tl for c in f)
+        and frames_tl[0][0]["type"] == "task_update"
+        and frames_tl[0][0]["sources"][0] == {"type": "url", "url": "https://x.com", "text": "X"}
+    )
+    print(f"[self-test] {'OK  ' if tl_ok else 'FAIL'} taskplan render: timeline mode, no plan_update, source ok")
+    if not tl_ok:
+        fail += 1
+
     total = (
         len(fixtures)
         + len(decision_cases)
         + len(final_classifier_cases)
         + len(event_filter_cases)
+        + len(taskplan_cases)
+        + 2  # taskplan renderer assertions
+        + 1  # taskplan stream-reply case
         + 3 + 2 + 3 + 4
     )
     print(f"\nself-test: {total - fail} pass / {fail} fail")

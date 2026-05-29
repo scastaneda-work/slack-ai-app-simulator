@@ -235,7 +235,8 @@ To stop the app cleanly, press `Ctrl+C`. To restart after any change, `Ctrl+C` t
 2. Within ~2 seconds you should see a loading indicator rotate under the bot's name: *"is thinking..."*, then *"is drafting..."*, etc.
 3. After ~7–10 seconds a streamed reply should appear.
 4. If your bot has Block Kit enabled (Block Kit is Slack's structured-card renderer — the thing that turns JSON into nice-looking message cards, Asana-style), ask it something structured like "show me the blockers" or "give me a status summary" — the reply should render as a card, not raw JSON.
-5. Invite the bot to any channel (`/invite @<display_name>`), then `@<display_name> ping`. A reply should appear in-thread.
+5. If your bot has taskplan enabled (the animated "Searched… → Found…" task cards / plan checklist that some research apps show while they work), ask a multi-step question like "research X and tell me what's blocking it". You should see a short animated sequence of task cards before the answer lands in the same message. A quick one-line question won't trigger it — that's expected.
+6. Invite the bot to any channel (`/invite @<display_name>`), then `@<display_name> ping`. A reply should appear in-thread.
 
 If any of those fail, check your audit channel (if you set one up). Each error logs a specific reason.
 
@@ -322,6 +323,8 @@ Each persona still needs its own Slack app + tokens if you want them to appear a
 **"ERROR: Another simulator instance is already running (PID ...)"** — A second `./run_app.sh` can't run while a first is live. Either stop the first (`Ctrl+C` in that Terminal) or `kill <PID>`, then start again. This guard prevents two instances from racing over the Socket Mode connection (Slack delivers events to the last-connected instance, which creates baffling "the bot answered once then stopped" bugs).
 
 **I renamed the bot but Slack's typing indicator still shows the old name** — The typing indicator uses the bot's Slack profile `real_name`, which isn't controlled by `config/app_config.json` `display_name` or the manifest. To change it, go to **api.slack.com → your app → Bot User → Edit** and update the name there. Calling `users.profile.set` from code does not work for bot tokens (it returns `not_allowed_token_type`).
+
+**The task-card animation doesn't appear, or raw `taskplan` JSON shows up in the message** — The streaming task cards need `slack-sdk` 3.40 or newer (the chunk models didn't exist before then). Re-run `.venv/bin/pip install -r requirements.txt` to pick up the bumped pin, then `Ctrl+C` the app and `./run_app.sh` again. Also confirm `"taskplan_enabled": true` is set in `config/app_config.json` for the persona you're running.
 
 ---
 

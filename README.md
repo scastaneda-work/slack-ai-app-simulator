@@ -54,6 +54,8 @@ The simulator is a small Python program that connects to Slack via Socket Mode (
 
 No API keys in this project. Your local Claude Code install handles authentication.
 
+Optionally, a persona can play an animated **task-card / plan** sequence before its answer — the "Searched… → Found…" timeline or "Thinking → ✓ step" checklist you've seen from research apps like Perplexity and Claude. The onboarding wizard decides whether to turn it on, based on how the real app you're simulating behaves in the Slack marketplace. It's off by default.
+
 ## What's in the folder
 
 | Path | What it is |
@@ -63,7 +65,7 @@ No API keys in this project. Your local Claude Code install handles authenticati
 | `run_app.sh` | The command to start the simulator. |
 | `manifest.template.json` | Template for creating your Slack app. Filled in during onboarding. |
 | `agent/personas/*.md` | Your persona file (created during onboarding). Edit to change how the bot talks. |
-| `config/app_config.json` | App name, model, loading messages, persona path. Created during onboarding. |
+| `config/app_config.json` | App name, model, loading messages, persona path, and the `blockkit_enabled` / `taskplan_enabled` display toggles. Created during onboarding. |
 | `tokens.json` | Your Slack tokens. Created during setup. **Never committed.** |
 
 ## Reconfiguring for a different demo

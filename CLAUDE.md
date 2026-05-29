@@ -73,6 +73,21 @@ Decide internally based on the app being simulated:
 
 Announce the call: *"Since you're simulating Asana, I'm going to teach the bot to render structured views (like 'show me the blockers') as Block Kit cards — the same style the real Asana Slack app uses. Short Q&A will stay as plain text. Sound good?"*
 
+### Step 5b — Progress animation (taskplan) — your judgment, announced
+
+Some marketplace AI apps play an animated "working" sequence *before* the answer — a timeline of task cards ("Searched the board → Found 3 blockers"), or a grouped plan checklist ("Thinking → ✓ step → ✓ step"). This is Slack's streaming task-card / plan-block display, and it makes the simulator feel like the real app's "show its work" moment. It's an optional capability (the `taskplan_enabled` flag), the streaming sibling of Block Kit.
+
+**Decide internally, grounded in how the REAL app behaves in the Slack marketplace:**
+
+- **Enable taskplan** for apps whose value is visibly *multi-step research or planning*: **Perplexity** (searches + cites sources as it goes — the canonical case), **Claude** (extended thinking / research), **Glean** and **Guru** (multi-source answers), **Notion AI** (workspace-wide search). These apps genuinely show their work, so the animation is authentic.
+- **Leave it off** for single-shot, conversational, or transactional apps: ChatGPT quick Q&A, **Cursor** inline edits, **Asana** (the real Slack app just posts summaries — no live step narration), status-bot style apps. An animation on a one-line reply looks fake.
+
+Pick the mode in the persona (Step 8): **`timeline`** (individual cards, best when there are sources to show — Perplexity, Glean) or **`plan`** (a grouped checklist with a title — best for "thinking"/multi-step plans — Claude).
+
+Announce the call: *"Since you're simulating Perplexity, I'll teach the bot to play a short 'Searched… → Found…' animation before research answers — the way the real app shows its work as it searches. Quick replies skip it. Sound good?"*
+
+Set `taskplan_enabled` accordingly in `config/app_config.json`. Note the trade-off out loud only if asked: when the animation plays, that reply doesn't type out token-by-token (the animated cards replace the live typing) — that's the intended look, the cards *are* the "working" indicator.
+
 ### Step 6 — Model
 
 *"Which Claude model should the simulator use under the hood? Defaults and when to pick them:*
@@ -96,6 +111,8 @@ Generate 4 short "is …" phrases tailored to the app being simulated. These rot
 | Claude | `is thinking...`, `is considering...`, `is drafting...`, `is composing...` |
 | Glean | `is searching...`, `is ranking results...`, `is summarizing...`, `is drafting...` |
 
+If you enabled taskplan in Step 5b, these rotating messages still play for quick (non-animated) replies; the animated task cards replace them when the model emits a taskplan fence. No extra config needed.
+
 ### Step 8 — Write the files
 
 Write these in this order, using the Write tool:
@@ -109,14 +126,44 @@ Write these in this order, using the Write tool:
    | `{{ROLE_ONE_LINER}}` | A one-line role description, e.g. *"a project management AI that tracks tasks and blockers"* |
    | `{{PERSONA_BODY_PLACEHOLDER}}` | The product-specific persona body — features, stakeholders, scenarios, dates, pricing — synthesized from Step 4. This is where the demo content lives. |
    | `{{SAMPLE_ANSWERS_PLACEHOLDER}}` | 3–4 sample answers to representative questions in the persona's voice. Use `*single asterisks*` for bold (they'll be emitted verbatim). |
+   | `{{TASKPLAN_SECTION_PLACEHOLDER}}` | If you enabled taskplan in Step 5b: the taskplan section below (pick the mode you chose). If you left it off: replace with an empty string (delete the placeholder line). |
 
    The template already bakes in: Slack mrkdwn rules (single-asterisk bold, no `**double asterisks**`, no H1/H2 headings, no prose code fences), the `:large_yellow_circle:` shortcode (`:yellow_circle:` renders blank), Block Kit fence rules (entire response is one ` ```blockkit ` fence — first character is a backtick), the "you already know who the user is" rule, and the default behavior rules (lead with the answer, commit to a first pass, match the register). Don't re-state these in the substituted body — they're already there.
+
+   **Taskplan section** (substitute for `{{TASKPLAN_SECTION_PLACEHOLDER}}` only when Step 5b enabled it). This teaches the model the ` ```taskplan ` fence. Drop in the block below and keep the example matching the mode you chose (`timeline` or `plan`):
+
+   ```markdown
+
+   ## Progress animation — the taskplan fence
+
+   For a multi-step request (research, a lookup across sources, a plan), you MAY begin your response with a single ` ```taskplan ` fence describing a short loading animation that plays before your answer — the way the real app shows its work. Skip it for quick one-line replies.
+
+   - The ` ```taskplan ` fence is the *very first thing* in your response — first character is a backtick. Your real answer comes AFTER the closing fence (plain text, or a ` ```blockkit ` card if cards are enabled).
+   - 3–6 steps. Each step needs an `id` (unique string), a `title`, and `status` (use `"complete"` — the steps are work you've finished). `details` is an optional one-line result. `sources` is optional; each source needs BOTH `url` and `text`.
+   - `mode` is `"timeline"` (individual cards — best when you have sources to show) or `"plan"` (a grouped checklist with a title).
+
+   Timeline example:
+   ` ```taskplan `
+   `{"mode":"timeline","title":"Researching the launch","steps":[{"id":"1","title":"Searched the workspace","details":"Scanned 18 docs","status":"complete"},{"id":"2","title":"Found 3 open blockers","status":"complete","sources":[{"url":"https://example.com/board","text":"Project board"}]}]}`
+   ` ``` `
+   `Here's where the launch stands: three blockers remain…`
+
+   Plan example:
+   ` ```taskplan `
+   `{"mode":"plan","title":"Thinking it through","steps":[{"id":"1","title":"Reviewed the current status","status":"complete"},{"id":"2","title":"Identified the owners","status":"complete"},{"id":"3","title":"Sequenced the milestones","status":"complete"}]}`
+   ` ``` `
+   `Here's the plan…`
+
+   ---
+   ```
+
+   (In the persona file, the example fences become real triple-backtick fences — they're spaced here only to avoid nesting confusion in this doc.)
 
    The `slug` is the app name lowercased, spaces → hyphens, anything non-alphanumeric stripped (e.g., "Asana Demo" → `asana-demo`).
 
    **After writing, show the SE the persona body and sample answers (the parts you actually filled in) and ask for confirmation before moving on.** They're the only parts that depend on Step 4 — everything else is template.
 
-2. **`config/app_config.json`** — with fields: `app_name`, `display_name`, `simulates`, `model` (default `claude-sonnet-4-6`), `loading_messages` (4 strings), `persona_path` (relative, e.g., `agent/personas/asana-demo.md`), `blockkit_enabled` (boolean).
+2. **`config/app_config.json`** — with fields: `app_name`, `display_name`, `simulates`, `model` (default `claude-sonnet-4-6`), `loading_messages` (4 strings), `persona_path` (relative, e.g., `agent/personas/asana-demo.md`), `blockkit_enabled` (boolean), `taskplan_enabled` (boolean — the Step 5b decision; default `false`).
 
 3. **`manifest.json`** — copy `manifest.template.json` and substitute `{{APP_NAME}}`, `{{DISPLAY_NAME}}`, `{{SIMULATES}}`.
 
@@ -133,6 +180,8 @@ Write these in this order, using the Write tool:
    3. If Block Kit is enabled: one question that should trigger a card (list/board/summary). If not: a second text question from a different angle.
    4. A question the bot should politely refuse (out of scope for the persona).
    5. A follow-up / clarification question that builds on one of the earlier prompts.
+
+   If taskplan is enabled (Step 5b), make at least one of these a clearly multi-step request ("research X and tell me what's blocking it", "work through the plan for Y") so the demo shows the animation. A one-line factual question won't trigger it.
 
    Example file contents (generic template — replace the prompts with Step 4 specifics):
 
@@ -155,6 +204,8 @@ The Formatting and Behavior rules above encode runtime learnings the simulator h
 | `:yellow_circle:` renders as blank in Slack | Use `:large_yellow_circle:` |
 | Model asks "who are you?" on "my priorities" style questions | System prompt tells the bot the user's name at runtime; persona says never ask |
 | Block Kit JSON > Slack schema limits | Runtime validates and audit-logs violations; persona caps sections at 6 |
+| Prose before the ` ```taskplan ` fence makes the animation render after a stray lead-in line | First output char must be a backtick (same rule as blockkit) |
+| Taskplan source missing `url` or `text` | Each source needs BOTH; runtime drops malformed sources and audit-logs the plan as invalid |
 
 Runtime pitfalls (not persona-related, but worth naming here so you don't regress them when editing `agent/demo_agent.py`):
 
@@ -163,6 +214,7 @@ Runtime pitfalls (not persona-related, but worth naming here so you don't regres
 | Bot's "is typing…" name doesn't match `display_name` in `app_config.json` | Typing indicator uses the bot's Slack profile `real_name` — rename via api.slack.com → Bot User → Edit. Not fixable from code (bot tokens can't call `users.profile.set`) |
 | Admin-token or service-app posts arrive with a `bot_id` set and get silently dropped | `_should_skip_event` compares `bot_id` to *our own* `self.bot_id` only. Do NOT regress by re-adding `if event.get("bot_id"): return`. QA fixtures guard this |
 | Two simulator instances fight over the Socket Mode connection | `main()` uses a PID lock at `.simulator.lock`; stale locks are auto-reclaimed. Don't remove the lock without a plan for this |
+| Taskplan-enabled personas don't stream tokens live for animated replies | Intentional — the animation buffers the whole reply then plays cards (`_animate_taskplan`). Don't "fix" by interleaving with delta streaming. Needs `slack-sdk >= 3.40` (chunk models). |
 
 If a new failure mode comes up in live use, the fix belongs in both places: the **persona template here** (so new installs bake it in) AND the **QA fixtures in `agent/qa.py`** (so `--self-test` catches regressions).
 
@@ -176,7 +228,7 @@ Two-step gate before handing prompts to the SE: a fast offline self-test that ca
 .venv/bin/python agent/qa.py --self-test
 ```
 
-This runs in under a second — no `claude` CLI calls, no Slack calls. It exercises the Block Kit extractor, validator, streaming-decision helper, drop handler, and identity resolution against fixtures. **If it fails, stop here and don't run `--vet-questions`** — the runtime is broken and the live vetting won't tell you anything useful. Surface the failure, fix the cause, then continue.
+This runs in under a second — no `claude` CLI calls, no Slack calls. It exercises the Block Kit extractor, validator, streaming-decision helper, drop handler, identity resolution, and (when present) the taskplan extractor, validator, renderer, and animation path against fixtures. **If it fails, stop here and don't run `--vet-questions`** — the runtime is broken and the live vetting won't tell you anything useful. Surface the failure, fix the cause, then continue.
 
 **9b. Live vetting:**
 
@@ -206,7 +258,8 @@ Then surface this checklist verbatim — it's the canonical "what's left to fill
 |---|---|
 | `agent/personas/<slug>.md` | Persona body and sample answers reflect the Step 4 answers (everything else is template — don't edit) |
 | `examples/demo_prompts_generated.md` | All 5 prompts PASSed `agent/qa.py --vet-questions` |
-| `config/app_config.json` | `display_name`, `simulates`, `model`, `loading_messages`, `persona_path`, `blockkit_enabled` look right |
+| `config/app_config.json` | `display_name`, `simulates`, `model`, `loading_messages`, `persona_path`, `blockkit_enabled`, `taskplan_enabled` look right |
+| `config/app_config.json` | `taskplan_enabled` matches the Step 5b decision (on for research/planning apps, off otherwise); persona has the taskplan section iff enabled |
 | `manifest.json` | App name has a differentiator vs the real Marketplace app |
 | `tokens.json` | Empty for now — Steps 6–8 of `SETUP.md` fill it in |
 | Slack `@username` (post-install) | Manifest install sets `Default username` once; rename via api.slack.com → Bot User if the handle leaks the simulator (e.g. mentions show `@claudesim_local`) |

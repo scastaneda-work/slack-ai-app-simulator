@@ -223,6 +223,154 @@ def _blockkit_decision(buf: str, elapsed_s: float, floor_s: float) -> str:
     return "buffer"
 
 
+# Taskplan extraction + rendering.
+#
+# Sibling to the ```blockkit fence: when enabled, the model may emit its
+# response with a ```taskplan JSON fence at the TOP, describing a loading
+# animation (a "timeline" of task cards, or a grouped "plan" block) that plays
+# BEFORE the answer. The text after the fence is the real answer, which may
+# itself be a ```blockkit card or plain markdown. The animation uses Slack's
+# streaming task_update / plan_update chunks (slack-sdk >= 3.40); the renderer
+# emits plain dicts and lets the SDK serialize them, so no chunk classes are
+# imported in the hot path. See qa.py --self-test for the fixture set.
+TASKPLAN_FENCE_RE = re.compile(r"^\s*```taskplan\s*\n(.*?)\n```", re.DOTALL)
+_TASKPLAN_LOOSE_RE = re.compile(r"```taskplan\s*\n(.*?)\n```", re.DOTALL)
+_TASKPLAN_MODES = {"timeline", "plan"}
+_TASKPLAN_STATUSES = {"pending", "in_progress", "complete", "error"}
+# Cap steps so a runaway plan can't spam dozens of chat.appendStream calls.
+_TASKPLAN_MAX_STEPS = 12
+# Per-step animation pacing. The plan plays in place of the loading floor, so
+# keep total well under LOADING_FLOOR_MAX_S for a typical 3-5 step plan.
+TASKPLAN_STEP_INTERVAL_S = 0.6
+
+
+def _extract_taskplan_json(text: str) -> tuple[dict | None, str, str]:
+    """Pull a leading ```taskplan fence out of text.
+
+    Returns (plan_or_None, rest_text, tier) where tier is one of:
+      - "strict"        — fence is at the very top of the response
+      - "trailing_prose"— fence present but not at the very top (lead-in prose)
+      - "parse_error"   — fence found but JSON parse failed
+      - "no_fence"      — no ```taskplan marker at all
+
+    `rest_text` is everything AFTER the fence (the actual answer: a ```blockkit
+    card or plain markdown). On no_fence / parse_error, rest_text is the
+    original text unchanged so the caller can fall back to normal handling.
+
+    No "truncated" tier (unlike blockkit): a cut-off plan just means the
+    animation is incomplete, so we safely degrade to "no animation" rather than
+    bracket-walking a partial plan.
+    """
+    m = TASKPLAN_FENCE_RE.match(text)
+    if m:
+        try:
+            plan = json.loads(m.group(1))
+        except ValueError:
+            return None, text, "parse_error"
+        if isinstance(plan, dict):
+            return plan, text[m.end():].lstrip("\n"), "strict"
+        return None, text, "parse_error"
+
+    m = _TASKPLAN_LOOSE_RE.search(text)
+    if m:
+        try:
+            plan = json.loads(m.group(1))
+        except ValueError:
+            return None, text, "parse_error"
+        if isinstance(plan, dict):
+            rest = text[: m.start()] + text[m.end():]
+            return plan, rest.strip("\n"), "trailing_prose"
+        return None, text, "parse_error"
+
+    return None, text, "no_fence"
+
+
+def _validate_taskplan(plan: dict) -> list[str]:
+    """Cheap subset-check of the taskplan schema. Returns human-readable
+    violations; empty list means "renderable"."""
+    violations: list[str] = []
+    if not isinstance(plan, dict):
+        return ["top-level is not an object"]
+    mode = plan.get("mode")
+    if mode not in _TASKPLAN_MODES:
+        violations.append(f"mode={mode!r} not in {sorted(_TASKPLAN_MODES)}")
+    steps = plan.get("steps")
+    if not isinstance(steps, list) or not steps:
+        violations.append("steps missing or empty")
+        return violations
+    if len(steps) > _TASKPLAN_MAX_STEPS:
+        violations.append(f"too many steps: {len(steps)} (max {_TASKPLAN_MAX_STEPS})")
+    seen_ids: set[str] = set()
+    for i, s in enumerate(steps):
+        if not isinstance(s, dict):
+            violations.append(f"step[{i}] is not an object")
+            continue
+        sid = s.get("id")
+        if not isinstance(sid, str) or not sid:
+            violations.append(f"step[{i}] missing string id")
+        elif sid in seen_ids:
+            violations.append(f"step[{i}] duplicate id {sid!r}")
+        else:
+            seen_ids.add(sid)
+        if not isinstance(s.get("title"), str) or not s.get("title"):
+            violations.append(f"step[{i}] missing title")
+        status = s.get("status")
+        if status is not None and status not in _TASKPLAN_STATUSES:
+            violations.append(f"step[{i}].status={status!r} invalid")
+        sources = s.get("sources")
+        if sources is not None:
+            if not isinstance(sources, list):
+                violations.append(f"step[{i}].sources not a list")
+            else:
+                for j, src in enumerate(sources):
+                    if not isinstance(src, dict) or not src.get("url") or not src.get("text"):
+                        violations.append(f"step[{i}].sources[{j}] needs both url and text")
+    return violations
+
+
+def _render_taskplan_chunks(plan: dict) -> tuple[list[list[dict]], str]:
+    """Turn a validated taskplan dict into a list of animation frames.
+
+    Returns (frames, mode). Each frame is a list of chunk-dicts suitable for
+    chat_startStream(chunks=...) / chat_appendStream(chunks=...). The caller
+    sends frames one at a time, paced, so steps animate in. Chunk-dicts pass
+    straight to the SDK, which serializes them as-is.
+
+    Frame layout:
+      - plan mode:     frame[0] = [{plan_update title}], then one frame per step.
+      - timeline mode: one frame per step (no plan_update).
+    Each step chunk uses its declared status (default 'complete' so a finished
+    plan reads as done).
+    """
+    mode = plan.get("mode")
+    title = plan.get("title") or ""
+    steps = plan.get("steps") or []
+    frames: list[list[dict]] = []
+    if mode == "plan" and title:
+        frames.append([{"type": "plan_update", "title": title}])
+    for s in steps:
+        status = s.get("status")
+        chunk: dict[str, Any] = {
+            "type": "task_update",
+            "id": str(s.get("id")),
+            "title": s.get("title") or "",
+            "status": status if status in _TASKPLAN_STATUSES else "complete",
+        }
+        if s.get("details"):
+            chunk["details"] = s["details"]
+        srcs = s.get("sources")
+        if isinstance(srcs, list) and srcs:
+            valid_srcs = [
+                {"type": "url", "url": src["url"], "text": src["text"]}
+                for src in srcs
+                if isinstance(src, dict) and src.get("url") and src.get("text")
+            ]
+            if valid_srcs:
+                chunk["sources"] = valid_srcs
+        frames.append([chunk])
+    return frames, mode
+
+
 _NAME_BAD_CHARS = re.compile(r"[`*_~|<>\\\n\r\t]")
 
 
@@ -366,6 +514,9 @@ class Simulator:
             f"is composing...",
         ]
         self.blockkit_enabled: bool = bool(cfg.get("blockkit_enabled", False))
+        # Optional streaming task-card / plan-block animation (sibling to
+        # blockkit). Off by default → zero behavior change for existing installs.
+        self.taskplan_enabled: bool = bool(cfg.get("taskplan_enabled", False))
         self.stream = stream
 
         persona_rel = cfg.get("persona_path")
@@ -783,7 +934,9 @@ class Simulator:
         ts: str | None = None
         last_flush = time.monotonic()
         started_streaming = False
-        detect_phase = self.blockkit_enabled
+        # When taskplan is enabled we must buffer the whole reply (the animation
+        # needs the full plan up front), so detect_phase stays on for it too.
+        detect_phase = self.blockkit_enabled or self.taskplan_enabled
         is_blockkit = False
         final_text = ""
         error_text: str | None = None
@@ -809,21 +962,27 @@ class Simulator:
             buf = ""
             last_flush = time.monotonic()
 
-        def _start_stream() -> bool:
+        def _start_stream(task_display_mode: str | None = None) -> bool:
             """Open the Slack streaming placeholder. Returns False (with a
             fallback-to-postMessage audit note) on SlackApiError OR when the
             response comes back without a usable `ts`. The missing-ts branch
             protects us from downstream appendStream/stopStream calls that
-            would fail with invalid_arguments."""
+            would fail with invalid_arguments.
+
+            task_display_mode ("timeline"/"plan") is only set for the taskplan
+            animation path; the plain-text streaming callers leave it None."""
             nonlocal ts
             try:
-                start_resp = self.web.chat_startStream(
+                start_kwargs: dict[str, Any] = dict(
                     channel=channel,
                     thread_ts=thread_ts,
                     recipient_team_id=self.team_id,
                     recipient_user_id=user_id,
                     username=self.display_name,
                 )
+                if task_display_mode is not None:
+                    start_kwargs["task_display_mode"] = task_display_mode
+                start_resp = self.web.chat_startStream(**start_kwargs)
             except SlackApiError as e:
                 err = e.response.get("error")
                 log.error("chat.startStream failed (%s)", err)
@@ -881,6 +1040,11 @@ class Simulator:
                 # the loading floor so a slow pre-fence sentence doesn't
                 # get mis-committed to plain-text streaming.
                 if detect_phase:
+                    if self.taskplan_enabled:
+                        # Taskplan needs the whole response up front to animate,
+                        # so never commit to live text streaming — just buffer
+                        # until generation finishes, then decide after the loop.
+                        continue
                     decision = _blockkit_decision(
                         buf, time.monotonic() - t_start, floor_s
                     )
@@ -924,6 +1088,34 @@ class Simulator:
             raise RuntimeError(f"claude CLI error: {error_text[:500]}")
 
         full_text = final_text.strip() or buf.strip() or "(no response)"
+
+        # Taskplan path: a ```taskplan fence at the top describes a loading
+        # animation that plays BEFORE the answer. We buffered the whole reply
+        # (see detect_phase), so parse it now. The "rest" after the fence is the
+        # real answer (a ```blockkit card or plain text), which finalizes the
+        # SAME streamed message via chat.stopStream.
+        if self.taskplan_enabled:
+            plan, rest, tp_tier = _extract_taskplan_json(full_text)
+            if plan is not None:
+                tp_violations = _validate_taskplan(plan)
+                if not tp_violations:
+                    handled = self._animate_taskplan(
+                        channel, thread_ts, user_id, plan, rest,
+                        t_start, floor_s, loading_stop,
+                    )
+                    if handled:
+                        return full_text, EMPTY_USAGE
+                    # startStream failed — fall through and render the answer
+                    # (fence stripped) via the normal path below.
+                else:
+                    audit_log(
+                        f":warning: {self.display_name} taskplan fence invalid "
+                        f"(tier=`{tp_tier}`) violations={tp_violations}. "
+                        f"Rendering answer without animation."
+                    )
+                # Either invalid plan or startStream failed: continue with the
+                # answer text only (fence removed so raw JSON never leaks).
+                full_text = rest or full_text
 
         # Late-arriving Block Kit detection: when the CLI only emits a terminal
         # `result` event (no incremental deltas), detect_phase never flipped.
@@ -1033,6 +1225,14 @@ class Simulator:
 
         text = "".join(parts).strip() or "(no response)"
 
+        # --no-stream can't animate (streaming is the whole mechanism). If a
+        # taskplan fence is present, drop it and keep only the answer so raw
+        # JSON never leaks into the message.
+        if self.taskplan_enabled:
+            plan, rest, _tier = _extract_taskplan_json(text)
+            if plan is not None:
+                text = rest or text
+
         remaining = floor_s - (time.monotonic() - t_start)
         if remaining > 0:
             time.sleep(remaining)
@@ -1068,6 +1268,100 @@ class Simulator:
         else:
             self._post(channel, thread_ts, text)
         return text, EMPTY_USAGE
+
+    def _animate_taskplan(
+        self,
+        channel: str,
+        thread_ts: str,
+        user_id: str,
+        plan: dict,
+        answer_text: str,
+        t_start: float,
+        floor_s: float,
+        loading_stop: Event,
+    ) -> bool:
+        """Open a task_display_mode stream, animate the plan's steps, then
+        finalize the SAME message with the answer (Block Kit blocks if the
+        answer is a card and blockkit is enabled, else plain markdown).
+
+        Returns True if it owned and finalized the message, False if startStream
+        failed (caller falls back to normal handling of the answer).
+        """
+        frames, mode = _render_taskplan_chunks(plan)
+        ts: str | None = None
+        try:
+            start_kwargs: dict[str, Any] = dict(
+                channel=channel,
+                thread_ts=thread_ts,
+                recipient_team_id=self.team_id,
+                recipient_user_id=user_id,
+                username=self.display_name,
+                task_display_mode=mode,
+            )
+            if frames:
+                start_kwargs["chunks"] = frames[0]
+            start_resp = self.web.chat_startStream(**start_kwargs)
+            ts = start_resp.get("ts") if start_resp else None
+        except SlackApiError as e:
+            err = e.response.get("error")
+            log.error("taskplan chat.startStream failed: %s", err)
+            audit_log(
+                f":warning: {self.display_name} taskplan `chat.startStream` "
+                f"rejected → `{err}`. Falling back to plain answer."
+            )
+            loading_stop.set()
+            return False
+        if not ts:
+            audit_log(
+                f":warning: {self.display_name} taskplan startStream returned "
+                f"no ts. Falling back to plain answer."
+            )
+            loading_stop.set()
+            return False
+
+        loading_stop.set()
+        self._set_status(channel, thread_ts, "")
+
+        # Animate the remaining frames, paced so each card lands as its own
+        # update. frame[0] already rode on startStream above.
+        for frame in frames[1:]:
+            time.sleep(TASKPLAN_STEP_INTERVAL_S)
+            try:
+                _retrying_append_stream(self.web, channel=channel, ts=ts, chunks=frame)
+            except SlackApiError as e:
+                err = e.response.get("error")
+                log.error("taskplan chat.appendStream failed: %s", err)
+                audit_log(
+                    f":warning: {self.display_name} taskplan `chat.appendStream` "
+                    f"rejected → `{err}`. Finalizing with the answer."
+                )
+                break
+
+        # Decide the answer payload. If blockkit is also enabled and the answer
+        # is a valid card, finalize with blocks; else finalize with markdown.
+        blocks = None
+        if self.blockkit_enabled and answer_text:
+            cand_blocks, _tier = _extract_blockkit_json(answer_text)
+            if cand_blocks and not _validate_blocks(cand_blocks):
+                if not _blocks_too_large(cand_blocks, MAX_BLOCKS_JSON_BYTES):
+                    blocks = cand_blocks
+
+        stop_kwargs: dict[str, Any] = {"channel": channel, "ts": ts}
+        if blocks:
+            stop_kwargs["blocks"] = blocks
+        else:
+            stop_kwargs["markdown_text"] = answer_text or "Done."
+        try:
+            _retrying_stop_stream(self.web, **stop_kwargs)
+        except SlackApiError as e:
+            err = e.response.get("error")
+            log.error("taskplan chat.stopStream failed: %s", err)
+            audit_log(
+                f":warning: {self.display_name} taskplan `chat.stopStream` "
+                f"rejected → `{err}`. Posting answer separately."
+            )
+            self._post(channel, thread_ts, answer_text or "Done.")
+        return True
 
 
 def main() -> int:
