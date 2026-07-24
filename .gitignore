@@ -11,3 +11,8 @@ examples/demo_prompts_generated.md
 .claude/
 .simulator.lock
 .pytest_cache/
+
+# Slack CLI local state (may contain app IDs / tokens) — see optional CLI section in SETUP.md
+.slack/apps.json
+.slack/apps.dev.json
+.slack/cache/
