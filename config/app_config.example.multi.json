@@ -14,7 +14,8 @@
         "is composing..."
       ],
       "persona_path": "agent/personas/claudesim.md",
-      "blockkit_enabled": false
+      "blockkit_enabled": false,
+      "taskplan_enabled": true
     },
     "asanasim": {
       "app_name": "AsanaSim",
@@ -28,7 +29,8 @@
         "is drafting a reply..."
       ],
       "persona_path": "agent/personas/asanasim.md",
-      "blockkit_enabled": true
+      "blockkit_enabled": true,
+      "taskplan_enabled": false
     }
   }
 }
